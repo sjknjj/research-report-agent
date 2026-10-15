@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from ..data.data_service import CompanyBundle
 
@@ -98,6 +98,16 @@ class FactBase:
                 ff.get("date", ""))
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _yi_cell(yuan: Any) -> str:
+        """金额单元格：缺失一律渲染为“—”，绝不写成 0.00 亿元（否则等于告诉模型这里是真实值）。"""
+        if yuan is None:
+            return "—"
+        try:
+            return f"{float(yuan) / _YI:.2f}"
+        except (TypeError, ValueError):
+            return "—"
+
     def recent_periods_table(self) -> str:
         rows = self.bundle.financial_summary.get("recent_periods", [])
         if not rows:
@@ -108,8 +118,8 @@ class FactBase:
             lines.append(
                 "| {p} | {rev} | {np} | {ry} | {ny} | {gm} | {roe} | {eps} |".format(
                     p=r.get("period", ""),
-                    rev=f"{(r.get('revenue_yuan') or 0)/_YI:.2f}",
-                    np=f"{(r.get('net_profit_yuan') or 0)/_YI:.2f}",
+                    rev=self._yi_cell(r.get("revenue_yuan")),
+                    np=self._yi_cell(r.get("net_profit_yuan")),
                     ry=fmt_pct(r.get("revenue_yoy_pct")),
                     ny=fmt_pct(r.get("net_profit_yoy_pct")),
                     gm=fmt_pct(r.get("gross_margin_pct"), signed=False),
@@ -124,7 +134,7 @@ class FactBase:
         b = self.bundle
         source_tag = "实时抓取(AKShare)" if b.source == "live" else "离线虚构样例(非真实证券)"
         lines = [
-            f"【已核实数据包 · 你只能使用以下数字，严禁引入数据包之外的任何财务/行情数字】",
+            "【已核实数据包 · 你只能使用以下数字，严禁引入数据包之外的任何财务/行情数字】",
             f"公司：{b.name}　代码：{b.symbol}　数据来源：{source_tag}　截至：{b.as_of}",
             "",
             f"■ 最新财务（报告期：{self.bundle.financial_summary.get('latest_period', '—')}）",

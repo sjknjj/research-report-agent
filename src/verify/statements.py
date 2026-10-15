@@ -19,6 +19,7 @@ class CheckItem:
     passed: bool
     detail: str
     severity: str = "error"          # error（不平）/ warn（背离）/ info
+    checked: bool = True             # False = 缺科目，未真正执行该勾稽
 
 
 @dataclass
@@ -26,35 +27,57 @@ class StatementCheckReport:
     items: List[CheckItem] = field(default_factory=list)
 
     @property
+    def data_sufficient(self) -> bool:
+        """是否至少完成了一项可执行的勾稽校验。"""
+        return any(i.checked for i in self.items)
+
+    @property
     def passed(self) -> bool:
-        return not any(i.severity == "error" and not i.passed for i in self.items)
+        # 修复 fail-open：一个字段都没有时绝不能报“通过”
+        if not self.data_sufficient:
+            return False
+        return not any(i.severity == "error" and i.checked and not i.passed for i in self.items)
 
     @property
     def n_errors(self) -> int:
-        return sum(1 for i in self.items if i.severity == "error" and not i.passed)
+        return sum(1 for i in self.items if i.checked and i.severity == "error" and not i.passed)
 
     @property
     def n_warnings(self) -> int:
-        return sum(1 for i in self.items if i.severity == "warn" and not i.passed)
+        return sum(1 for i in self.items if i.checked and i.severity == "warn" and not i.passed)
+
+    @property
+    def n_skipped(self) -> int:
+        return sum(1 for i in self.items if not i.checked)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "passed": self.passed,
+            "status": "ok" if self.data_sufficient else "insufficient",
+            "data_sufficient": self.data_sufficient,
             "n_errors": self.n_errors,
             "n_warnings": self.n_warnings,
+            "n_skipped": self.n_skipped,
             "items": [
                 {"name": i.name, "formula": i.formula, "passed": i.passed,
-                 "detail": i.detail, "severity": i.severity}
+                 "detail": i.detail, "severity": i.severity, "checked": i.checked}
                 for i in self.items
             ],
         }
 
     def render_text(self) -> str:
-        head = (f"三表勾稽结论：{'通过' if self.passed else '未通过'}｜"
-                f"错误 {self.n_errors}、预警 {self.n_warnings}、共检查 {len(self.items)} 项")
+        if not self.data_sufficient:
+            head = (f"三表勾稽结论：数据不足（未完成任何勾稽校验）｜"
+                    f"跳过 {self.n_skipped} 项、共检查 0 项")
+        else:
+            head = (f"三表勾稽结论：{'通过' if self.passed else '未通过'}｜"
+                    f"错误 {self.n_errors}、预警 {self.n_warnings}、共检查 {len(self.items)} 项")
         rows = [head]
         for i in self.items:
-            mark = "✓" if i.passed else ("✗" if i.severity == "error" else "!")
+            if not i.checked:
+                mark = "–"
+            else:
+                mark = "✓" if i.passed else ("✗" if i.severity == "error" else "!")
             rows.append(f"  [{mark}] {i.name}：{i.detail}")
         return "\n".join(rows)
 
@@ -85,14 +108,27 @@ def check_statements(
     :param balance: 资产负债表科目，键名参考常见中文科目：
         total_assets / total_liabilities / total_equity
     :param income: 利润表：revenue / operating_cost / operating_profit
-        / total_profit / income_tax / net_profit
+        / total_profit / income_tax / net_profit（**合并口径**净利润）
     :param cashflow: 现金流量表：begin_cash / end_cash / net_op_cash
         / net_inv_cash / net_fin_cash
+
+    缺少科目时不再静默跳过从而 fail-open，而是生成明确的“跳过（无法核实）”项；
+    若没有任何一项可校验，``passed`` 为 False 且 ``to_dict()["status"] == "insufficient"``。
     """
     report = StatementCheckReport()
     balance = balance or {}
     income = income or {}
     cashflow = cashflow or {}
+
+    def _missing(*pairs) -> List[str]:
+        return [label for label, value in pairs if _num(value) is None]
+
+    def _skip(name: str, formula: str, missing: List[str], severity: str = "info") -> None:
+        report.items.append(CheckItem(
+            name, formula, False,
+            "缺少科目：" + "、".join(missing) + "（未执行，无法核实）",
+            severity, checked=False,
+        ))
 
     # ---------- 资产负债表：资产 = 负债 + 权益 ----------
     ta = _num(balance.get("total_assets"))
@@ -108,8 +144,14 @@ def check_statements(
             f"{ta:,.2f} vs {tl:,.2f} + {te:,.2f} = {rhs:,.2f}"
             + ("（平衡）" if ok else "（不平衡，差额 %.2f）" % (ta - rhs)),
         ))
+    else:
+        _skip("资产负债表恒等式", "资产总计 = 负债合计 + 所有者权益合计",
+              _missing(("资产总计", balance.get("total_assets")),
+                       ("负债合计", balance.get("total_liabilities")),
+                       ("所有者权益合计", balance.get("total_equity"))))
 
     # ---------- 利润表：净利润 = 利润总额 - 所得税 ----------
+    # 注意：该恒等式只对**合并口径净利润**成立；归母净利润含少数股东损益，不得混用
     tp = _num(income.get("total_profit"))
     tax = _num(income.get("income_tax"))
     np_ = _num(income.get("net_profit"))
@@ -118,11 +160,16 @@ def check_statements(
         ok = _approx(expect, np_, tol)
         report.items.append(CheckItem(
             "利润表净利润勾稽",
-            "净利润 = 利润总额 − 所得税费用",
+            "净利润(合并口径) = 利润总额 − 所得税费用",
             ok,
             f"{tp:,.2f} − {tax:,.2f} = {expect:,.2f}，披露净利润 {np_:,.2f}"
             + ("（一致）" if ok else "（不一致）"),
         ))
+    else:
+        _skip("利润表净利润勾稽", "净利润(合并口径) = 利润总额 − 所得税费用",
+              _missing(("利润总额", income.get("total_profit")),
+                       ("所得税费用", income.get("income_tax")),
+                       ("净利润(合并口径)", income.get("net_profit"))))
 
     # 营业利润 ≈ 营业收入 − 营业成本 − 期间费用（允许有其他收益，给宽松判断）
     rev = _num(income.get("revenue"))
@@ -140,6 +187,12 @@ def check_statements(
             + ("（合理）" if ok else "（营业利润高于毛利，需核对其他收益）"),
             severity="warn",
         ))
+    else:
+        _skip("营业利润合理性", "营业利润 ≤ 营业收入 − 营业成本（忽略其他收益）",
+              _missing(("营业收入", income.get("revenue")),
+                       ("营业成本", income.get("operating_cost")),
+                       ("营业利润", income.get("operating_profit"))),
+              severity="warn")
 
     # ---------- 现金流量表：期末现金 = 期初 + 三类净额 ----------
     bc = _num(cashflow.get("begin_cash"))
@@ -157,6 +210,13 @@ def check_statements(
             f"{bc:,.2f} + ({oc:,.2f}) + ({ic:,.2f}) + ({fc:,.2f}) = {expect:,.2f}，"
             f"披露期末 {ec:,.2f}" + ("（平衡）" if ok else "（不平衡）"),
         ))
+    else:
+        _skip("现金流量表勾稽", "期末现金 = 期初现金 + 经营/投资/筹资净额",
+              _missing(("期初现金", cashflow.get("begin_cash")),
+                       ("期末现金", cashflow.get("end_cash")),
+                       ("经营净现金流", cashflow.get("net_op_cash")),
+                       ("投资净现金流", cashflow.get("net_inv_cash")),
+                       ("筹资净现金流", cashflow.get("net_fin_cash"))))
 
     # ---------- 跨表：现金流与利润背离（利润质量）----------
     if oc is not None and np_ is not None and np_ != 0:
@@ -170,6 +230,12 @@ def check_statements(
             + ("（利润含金量高）" if ok else "（现金回款偏弱，警惕纸面利润）"),
             severity="warn",
         ))
+    else:
+        _skip("经营现金流/净利润（利润质量）",
+              "经营净现金流 / 净利润 应接近或大于 1（>0.8 视为健康）",
+              _missing(("经营净现金流", cashflow.get("net_op_cash")),
+                       ("净利润(合并口径)", income.get("net_profit"))),
+              severity="warn")
 
     return report
 
@@ -184,7 +250,11 @@ FIELD_ALIASES = {
     "operating_profit": ["营业利润", "operating_profit"],
     "total_profit": ["利润总额", "total_profit"],
     "income_tax": ["所得税费用", "所得税", "income_tax"],
-    "net_profit": ["净利润", "归母净利润", "net_profit"],
+    # 合并口径净利润：只有它满足“净利润 = 利润总额 − 所得税费用”
+    "net_profit": ["净利润", "合并净利润", "net_profit"],
+    # 归母净利润单独成键，绝不与合并口径混用
+    "net_profit_attr": ["归属于母公司所有者的净利润", "归属于母公司股东的净利润",
+                        "归母净利润", "net_profit_attr"],
     "begin_cash": ["期初现金及现金等价物余额", "期初现金余额"],
     "end_cash": ["期末现金及现金等价物余额", "期末现金余额"],
     "net_op_cash": ["经营活动产生的现金流量净额", "经营净现金流"],
@@ -198,7 +268,7 @@ def statements_from_row(row: dict) -> Dict[str, Dict[str, Any]]:
     groups = {
         "balance": ("total_assets", "total_liabilities", "total_equity"),
         "income": ("revenue", "operating_cost", "operating_profit", "total_profit",
-                   "income_tax", "net_profit"),
+                   "income_tax", "net_profit", "net_profit_attr"),
         "cashflow": ("begin_cash", "end_cash", "net_op_cash", "net_inv_cash", "net_fin_cash"),
     }
     out: Dict[str, Dict[str, Any]] = {"balance": {}, "income": {}, "cashflow": {}}

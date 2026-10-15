@@ -11,9 +11,8 @@ CrossVerifier 做的是**数字比对**（正则抽数字 → 和事实库比）
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from ..common.logger import get_logger
 
@@ -38,16 +37,24 @@ class SemanticReport:
     total: int = 0
     supported: int = 0
     unsupported: List[Dict[str, str]] = field(default_factory=list)
+    checked: bool = False                 # 是否真正完成了语义判定
+    status: str = "unchecked"             # ok / skipped / failed / empty / unchecked
+    threshold: float = 0.7
+    message: str = ""
 
     @property
     def faithfulness_score(self) -> float:
-        if self.total == 0:
-            return 1.0
+        # 无法判定（未校验 / 空声明）时不得返回 1.0，否则等于 fail-open
+        if not self.checked or self.total <= 0:
+            return 0.0
         return round(self.supported / self.total, 3)
 
     @property
     def passed(self) -> bool:
-        return self.faithfulness_score >= 0.7
+        # 只有真正完成判定、且达到阈值才算通过
+        if not self.checked or self.total <= 0:
+            return False
+        return self.faithfulness_score >= self.threshold
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -55,6 +62,10 @@ class SemanticReport:
             "supported": self.supported,
             "faithfulness_score": self.faithfulness_score,
             "passed": self.passed,
+            "checked": self.checked,
+            "status": self.status,
+            "threshold": self.threshold,
+            "message": self.message,
             "unsupported_claims": self.unsupported,
         }
 
@@ -66,10 +77,14 @@ class SemanticChecker:
         self.llm = llm_client
         self.threshold = threshold
 
+    def _blank(self, status: str, message: str) -> SemanticReport:
+        return SemanticReport(checked=False, status=status, message=message,
+                              threshold=self.threshold)
+
     def check(self, generated_text: str, fact_pack: str) -> SemanticReport:
         if self.llm is None or self.llm.offline:
             logger.info("离线模式跳过语义校验")
-            return SemanticReport()
+            return self._blank("skipped", "离线模式跳过语义校验（未判定，不得视为通过）")
 
         messages = [
             {"role": "system", "content": _SYSTEM_PROMPT},
@@ -86,13 +101,25 @@ class SemanticChecker:
                 temperature=0.1,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("语义校验调用失败，跳过：%s", exc)
-            return SemanticReport()
+            logger.warning("语义校验调用失败：%s", exc)
+            return self._blank("failed", f"语义校验调用失败：{exc}（未判定，不得视为通过）")
 
-        claims = data.get("claims", []) if isinstance(data, dict) else []
-        report = SemanticReport(total=len(claims))
-        for item in claims:
+        if not isinstance(data, dict):
+            logger.warning("语义校验返回非 dict（%s），判定失败", type(data).__name__)
+            return self._blank("failed", "语义校验返回格式非法（非 JSON 对象），未判定")
+
+        raw_claims = data.get("claims")
+        if not isinstance(raw_claims, list) or not raw_claims:
+            logger.warning("语义校验未返回任何声明，判定失败")
+            return SemanticReport(checked=True, status="empty", threshold=self.threshold,
+                                  message="模型未返回任何原子声明，无法判定（不得视为通过）")
+
+        report = SemanticReport(total=len(raw_claims), checked=True, status="ok",
+                                threshold=self.threshold)
+        for item in raw_claims:
             if not isinstance(item, dict):
+                # 单条格式不合法 → 计为未支持，不能静默跳过
+                report.unsupported.append({"claim": str(item), "reason": "声明格式非法"})
                 continue
             if item.get("supported"):
                 report.supported += 1
@@ -101,8 +128,10 @@ class SemanticChecker:
                     "claim": str(item.get("claim", "")),
                     "reason": str(item.get("reason", "")),
                 })
+        report.message = f"语义校验完成：{report.supported}/{report.total} 条被支持"
         logger.info(
-            "语义校验：%d/%d 条声明被事实包支持，faithfulness=%.1f%%",
+            "语义校验：%d/%d 条声明被事实包支持，faithfulness=%.1f%%（阈值 %.0f%%）",
             report.supported, report.total, report.faithfulness_score * 100,
+            self.threshold * 100,
         )
         return report
