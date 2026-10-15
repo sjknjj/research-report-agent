@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from ..data.data_service import CompanyBundle
 
@@ -55,10 +55,79 @@ class FactBase:
     def __init__(self, bundle: CompanyBundle):
         self.bundle = bundle
         self.facts: Dict[str, Fact] = {}
+        # U2：按报告期索引的事实（用于"2024年营收…"这类跨期表述）
+        self.facts_by_period: Dict[str, Dict[str, Fact]] = {}
         self._build()
+        self._build_period_facts()
 
     def get(self, key: str) -> Optional[Fact]:
         return self.facts.get(key)
+
+    def get_for_period(self, key: str, period: str) -> Optional[Fact]:
+        """取某个报告期的事实；找不到则回退到最新期。"""
+        if period:
+            bucket = self.facts_by_period.get(period)
+            if bucket and key in bucket:
+                return bucket[key]
+            # 允许 "2024" 与 "2024-12-31" 这类前缀匹配
+            for known, bucket in self.facts_by_period.items():
+                if known.startswith(str(period)) and key in bucket:
+                    return bucket[key]
+        return self.facts.get(key)
+
+    def known_periods(self) -> List[str]:
+        return sorted(self.facts_by_period, reverse=True)
+
+    def _build_period_facts(self) -> None:
+        """按 ``recent_periods`` 建立分期事实，并计算环比（较上期）增速。
+
+        注意：这里的"环比"是**相邻报告期**之间的增速（口径取决于是年报还是季报），
+        因此标签统一写"较上期"，不做季度/年度假设。
+        """
+        rows = self.bundle.financial_summary.get("recent_periods") or []
+        currency = "yuan"
+        for idx, row in enumerate(rows):
+            period = str(row.get("period", "") or "")
+            if not period:
+                continue
+            bucket: Dict[str, Fact] = {}
+            for key, label in (("revenue_yuan", "营业总收入"),
+                               ("net_profit_yuan", "归母净利润")):
+                value = row.get(key)
+                if value is not None:
+                    bucket[key.replace("_yuan", "")] = Fact(
+                        key.replace("_yuan", ""), label, value, currency, period,
+                        self.bundle.source,
+                    )
+            for key, label in (("revenue_yoy_pct", "营业总收入同比增速"),
+                               ("net_profit_yoy_pct", "归母净利润同比增速"),
+                               ("gross_margin_pct", "销售毛利率"),
+                               ("net_margin_pct", "销售净利率"),
+                               ("roe_pct", "净资产收益率(ROE)"),
+                               ("eps", "基本每股收益")):
+                value = row.get(key)
+                if value is None:
+                    continue
+                short = key.replace("_pct", "")
+                unit = "price" if short == "eps" else "percent"
+                bucket[short] = Fact(short, label, value, unit, period, self.bundle.source)
+
+            # 环比（与上一个报告期相比；rows 是"最新在前"）
+            if idx + 1 < len(rows):
+                prev = rows[idx + 1]
+                for base, label in (("revenue_yuan", "营业总收入"),
+                                    ("net_profit_yuan", "归母净利润")):
+                    cur_v, prev_v = row.get(base), prev.get(base)
+                    if cur_v is None or prev_v in (None, 0):
+                        continue
+                    try:
+                        growth = (float(cur_v) - float(prev_v)) / abs(float(prev_v)) * 100
+                    except (TypeError, ValueError):
+                        continue
+                    qkey = base.replace("_yuan", "") + "_qoq"
+                    bucket[qkey] = Fact(qkey, f"{label}较上期增速", round(growth, 2),
+                                        "percent", period, self.bundle.source)
+            self.facts_by_period[period] = bucket
 
     def _build(self) -> None:
         fin = self.bundle.financial_summary.get("latest", {})
@@ -76,6 +145,12 @@ class FactBase:
         add("net_margin", "销售净利率", fin.get("net_margin_pct"), "percent")
         add("roe", "净资产收益率(ROE)", fin.get("roe_pct"), "percent")
         add("eps", "基本每股收益", fin.get("eps"), "price")
+
+        # 环比（最新期 vs 上一期）
+        rows = self.bundle.financial_summary.get("recent_periods") or []
+        qoq_latest = self._latest_qoq(rows)
+        add("revenue_qoq", "营业总收入较上期增速", qoq_latest.get("revenue_qoq"), "percent")
+        add("net_profit_qoq", "归母净利润较上期增速", qoq_latest.get("net_profit_qoq"), "percent")
 
         window = f"{price.get('start_date', '')}~{price.get('end_date', '')}"
         add("latest_close", "最新收盘价", price.get("latest_close"), "price", window)
@@ -96,6 +171,23 @@ class FactBase:
         if ff:
             add("main_net_inflow", "主力净流入净额", ff.get("main_net_inflow"), "yuan",
                 ff.get("date", ""))
+
+    @staticmethod
+    def _latest_qoq(rows: List[Dict[str, Any]]) -> Dict[str, float]:
+        """最新期相对上一期的环比增速（%）。rows 为"最新在前"。"""
+        out: Dict[str, float] = {}
+        if len(rows) < 2:
+            return out
+        cur, prev = rows[0], rows[1]
+        for base in ("revenue_yuan", "net_profit_yuan"):
+            try:
+                c, p = float(cur.get(base)), float(prev.get(base))
+            except (TypeError, ValueError):
+                continue
+            if p == 0:
+                continue
+            out[base.replace("_yuan", "") + "_qoq"] = round((c - p) / abs(p) * 100, 2)
+        return out
 
     # ------------------------------------------------------------------
     @staticmethod

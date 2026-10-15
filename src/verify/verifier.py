@@ -26,6 +26,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..common.logger import get_logger
 from .facts import FactBase, fmt_amount, fmt_pct
+from .numbers import (
+    KIND_AMOUNT,
+    KIND_BARE,
+    KIND_MULTIPLE,
+    KIND_PERCENT,
+    KIND_PRICE,
+    extract_numbers,
+    format_number,
+)
 
 logger = get_logger("verify.cross")
 
@@ -48,17 +57,26 @@ _PCT_RE = re.compile(_CONN + r"(" + _NUMPAT + r")\s*(?:个百分点|%|％)")
 _PRICE_RE = re.compile(_CONN + r"(" + _NUMPAT + r")\s*(元|港元|美元|倍)?")
 _YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 
-# 同比词与数字之间只允许方向词/连接词，不得跨越数字、百分号或标点
-_YOY_WORD = r"(?:同比|较上年同期|较去年同期|比上年同期|同比上年)"
-_YOY_RE = re.compile(
-    _YOY_WORD
-    + r"([^0-9%％\n，。；、]{0,8}?)"
-    + r"(" + _NUMPAT + r")\s*(?:个百分点|%|％)"
-)
-# 锚点与同比词之间的最大跨度
+# 锚点与增速词之间的最大跨度
 _YOY_WINDOW = 40
-# 锚点与同比词之间禁止跨越的字符（允许逗号：`营收152.3亿元，同比增长12.5%` 是合法写法）
+# 锚点与增速词之间禁止跨越的字符（允许逗号：`营收152.3亿元，同比增长12.5%` 是合法写法）
 _YOY_BLOCK_CHARS = "。；%％\n"
+_GROWTH_RE_CACHE: Dict[Tuple[str, ...], re.Pattern] = {}
+
+
+def _growth_re(words: Tuple[str, ...]) -> re.Pattern:
+    """按增速词（同比/环比…）构造正则：增速词 + 可选方向词 + 数字 + %。"""
+    key = tuple(words)
+    rx = _GROWTH_RE_CACHE.get(key)
+    if rx is None:
+        alt = "|".join(re.escape(w) for w in sorted(words, key=len, reverse=True))
+        rx = re.compile(
+            r"(?:" + alt + r")"
+            + r"([^0-9%％\n，。；、]{0,8}?)"
+            + r"(" + _NUMPAT + r")\s*(?:个百分点|%|％)"
+        )
+        _GROWTH_RE_CACHE[key] = rx
+    return rx
 
 
 @dataclass
@@ -67,11 +85,14 @@ class MetricSpec:
     label: str
     kind: str                      # amount / percent / price
     aliases: List[str] = field(default_factory=list)
-    yoy_anchor: bool = False       # 同比类：在关联指标窗口内找“同比…%”
+    yoy_anchor: bool = False       # 增速类：在关联指标窗口内找"同比/环比…%"
     unit_required: bool = False    # price 类是否必须带单位（股价/EPS 需要，PE/PB 不需要）
+    growth_words: Tuple[str, ...] = (
+        "同比", "较上年同期", "较去年同期", "比上年同期", "同比上年",
+    )
 
 
-# 指标词典：别名按“先长后短、先具体后宽泛”排列
+# 指标词典：别名按"先长后短、先具体后宽泛"排列
 METRICS: List[MetricSpec] = [
     MetricSpec("revenue", "营业总收入", "amount",
                ["营业总收入", "营业收入", "营收"]),
@@ -87,6 +108,15 @@ METRICS: List[MetricSpec] = [
                 "净利润增长"], yoy_anchor=True),
     MetricSpec("net_profit_deducted_yoy", "扣非净利润同比增速", "percent",
                ["扣非净利润同比", "扣非归母净利润同比"], yoy_anchor=True),
+    # U2：环比（较上期）——与同比分开，避免把"环比"当成"同比"比对
+    MetricSpec("revenue_qoq", "营业总收入较上期增速", "percent",
+               ["营业总收入环比", "营业收入环比", "营收环比", "营业总收入较上期",
+                "营收较上期"], yoy_anchor=True,
+               growth_words=("环比", "较上期", "较上一期", "比上期")),
+    MetricSpec("net_profit_qoq", "归母净利润较上期增速", "percent",
+               ["归母净利润环比", "净利润环比", "净利环比", "净利润较上期",
+                "归母净利润较上期"], yoy_anchor=True,
+               growth_words=("环比", "较上期", "较上一期", "比上期")),
     MetricSpec("gross_margin", "销售毛利率", "percent", ["销售毛利率", "毛利率"]),
     MetricSpec("net_margin", "销售净利率", "percent", ["销售净利率", "净利率"]),
     MetricSpec("roe", "净资产收益率", "percent",
@@ -98,6 +128,12 @@ METRICS: List[MetricSpec] = [
     MetricSpec("latest_pct", "最新单日涨跌幅", "percent",
                ["最新单日涨跌幅", "当日涨跌幅", "单日涨跌幅"]),
     MetricSpec("period_return", "区间涨跌幅", "percent", ["区间涨跌幅", "累计涨跌幅"]),
+    # 这三项事实库里本来就有，此前不在词典里，导致报告引用它们时被误判成"无来源"
+    MetricSpec("period_high", "区间最高价", "price",
+               ["区间最高价", "区间最高"], unit_required=True),
+    MetricSpec("period_low", "区间最低价", "price",
+               ["区间最低价", "区间最低"], unit_required=True),
+    MetricSpec("avg_turnover", "平均换手率", "percent", ["平均换手率"]),
     MetricSpec("annual_vol", "年化波动率", "percent", ["年化波动率", "波动率"]),
     MetricSpec("pe_ratio", "市盈率(PE)", "price",
                ["市盈率(PE-TTM)", "市盈率", "PE(TTM)", "PE"]),
@@ -108,12 +144,14 @@ METRICS: List[MetricSpec] = [
                ["主力净流入净额", "主力净流入", "主力资金净流入"]),
 ]
 
-# 同比指标关联的正指标锚点（用于定位“指标 … 同比 …%”）
-# 注意：不含裸“净利”，避免命中“净利率”
+# 同比/环比指标关联的正指标锚点（用于定位"指标 … 同比 …%"）
+# 注意：不含裸"净利"，避免命中"净利率"
 _YOY_ANCHORS = {
     "revenue_yoy": ["营业总收入", "营业收入", "营收"],
     "net_profit_yoy": ["归属于上市公司股东的净利润", "归母净利润", "净利润"],
     "net_profit_deducted_yoy": ["扣除非经常性损益后的净利润", "扣非归母净利润", "扣非净利润"],
+    "revenue_qoq": ["营业总收入", "营业收入", "营收"],
+    "net_profit_qoq": ["归属于上市公司股东的净利润", "归母净利润", "净利润"],
 }
 _NEG_WORDS = ("下降", "下滑", "减少", "降低", "回落", "收窄", "转负", "跌幅", "负增长")
 
@@ -125,6 +163,8 @@ class Claim:
     kind: str
     claimed: float
     raw: str
+    pos: int = -1          # 数值字面量在原文中的起始下标（用于与全量抽取对齐）
+    context: str = ""      # 数值附近上下文（用于分期归因）
 
 
 @dataclass
@@ -132,7 +172,14 @@ class VerificationReport:
     claims: List[Dict[str, Any]] = field(default_factory=list)
     issues: List[str] = field(default_factory=list)
     corrections: List[str] = field(default_factory=list)
+    # U1：无法归因到任何指标、也不与事实库任何数值吻合的数字
+    unsourced: List[Dict[str, Any]] = field(default_factory=list)
+    # U1：被忽略的噪声数字（年份/代码/无单位计数），不计入覆盖率分母
+    ignored_numbers: int = 0
+    # U3：同一指标在文中出现多次但数值互相矛盾
+    contradictions: List[Dict[str, Any]] = field(default_factory=list)
 
+    # ---- 计数 -----------------------------------------------------------
     @property
     def n_supported(self) -> int:
         return sum(1 for c in self.claims if c["status"] == "supported")
@@ -146,15 +193,35 @@ class VerificationReport:
         return sum(1 for c in self.claims if c["status"] == "unverifiable")
 
     @property
+    def total_numbers(self) -> int:
+        """报告中需要核对的数字总数（已归因 claims + 未归因 unsourced）。"""
+        return len(self.claims) + len(self.unsourced)
+
+    # ---- 比率 -----------------------------------------------------------
+    @property
     def unverifiable_ratio(self) -> float:
-        """无法核实项占比：越高说明事实库覆盖越差，不应因此“显得可信”。"""
-        if not self.claims:
+        """无法核实项占比：越高说明事实库覆盖越差，不应因此"显得可信"。"""
+        if not self.total_numbers:
             return 0.0
-        return round(self.n_unverifiable / len(self.claims), 3)
+        return round(self.n_unverifiable / self.total_numbers, 3)
+
+    @property
+    def unsourced_ratio(self) -> float:
+        """无来源归因的数字占比（U1）。越高说明"没被检查"的数字越多。"""
+        if not self.total_numbers:
+            return 0.0
+        return round(len(self.unsourced) / self.total_numbers, 3)
+
+    @property
+    def coverage(self) -> float:
+        """可核实覆盖率 = 一致数字 / 全部数字（U1/U4）。"""
+        if not self.total_numbers:
+            return 0.0
+        return round(self.n_supported / self.total_numbers, 3)
 
     @property
     def hallucination_rate(self) -> float:
-        # 分母 = 全部抽到的数值出现次数（含 unverifiable），不再是去重后的条数
+        # 分母 = 已归因的数值出现次数（含 unverifiable）
         if not self.claims:
             return 0.0
         return round(self.n_mismatch / len(self.claims), 3)
@@ -163,13 +230,51 @@ class VerificationReport:
     def passed(self) -> bool:
         return self.n_mismatch == 0
 
+    # ---- 可信度（U4：按覆盖率/无来源占比校准）---------------------------
+    def _downgrades(self) -> Tuple[int, List[str]]:
+        steps = 0
+        reasons: List[str] = []
+
+        ur = self.unverifiable_ratio
+        if ur > 0.8:
+            steps += 2
+            reasons.append(f"事实库无法核实的数字占比 {ur:.0%}（>80%），降 2 级")
+        elif ur > 0.5:
+            steps += 1
+            reasons.append(f"事实库无法核实的数字占比 {ur:.0%}（>50%），降 1 级")
+
+        us = self.unsourced_ratio
+        if us > 0.5:
+            steps += 2
+            reasons.append(f"无来源数字占比 {us:.0%}（>50%），降 2 级")
+        elif us > 0.25:
+            steps += 1
+            reasons.append(f"无来源数字占比 {us:.0%}（>25%），降 1 级")
+
+        cov = self.coverage
+        if self.total_numbers and cov < 0.3:
+            steps += 2
+            reasons.append(f"可核实覆盖率仅 {cov:.0%}（<30%），降 2 级")
+        elif self.total_numbers and cov < 0.6:
+            steps += 1
+            reasons.append(f"可核实覆盖率仅 {cov:.0%}（<60%），降 1 级")
+
+        if self.contradictions:
+            steps += 1
+            reasons.append(f"报告内部存在 {len(self.contradictions)} 处自相矛盾，降 1 级")
+        return steps, reasons
+
+    @property
+    def confidence_reasons(self) -> List[str]:
+        return self._downgrades()[1]
+
     @property
     def confidence_level(self) -> str:
         """可信度等级（A=高可信 / B=中可信 / C=低可信 / D=不可信）。
 
-        原始阈值与 README 一致（<5% / 5-15% / 15-30% / >30%）。
-        额外约束：``unverifiable`` 占比不得抬高可信度——无法核实的条目过多时下调等级，
-        避免“事实库覆盖不到的数字越多越可信”。
+        基础阈值与 README 一致（<5% / 5-15% / 15-30% / >30%）。
+        U4 新增校准：无法核实/无来源数字过多、覆盖率过低、内部自相矛盾时下调等级，
+        避免"没被检查的数字越多反而越可信"。
         """
         rate = self.hallucination_rate
         if rate < 0.05:
@@ -181,11 +286,8 @@ class VerificationReport:
         else:
             level = 3
 
-        ur = self.unverifiable_ratio
-        if ur > 0.8:
-            level = min(level + 2, 3)
-        elif ur > 0.5:
-            level = min(level + 1, 3)
+        steps, _ = self._downgrades()
+        level = min(level + steps, 3)
         names = ["A（高可信）", "B（中可信）", "C（低可信）", "D（不可信）"]
         return names[level]
 
@@ -193,13 +295,21 @@ class VerificationReport:
         return {
             "passed": self.passed,
             "confidence_level": self.confidence_level,
+            "confidence_reasons": self.confidence_reasons,
             "total_claims": len(self.claims),
+            "total_numbers": self.total_numbers,
             "supported": self.n_supported,
             "mismatch": self.n_mismatch,
             "unverifiable": self.n_unverifiable,
+            "unsourced": len(self.unsourced),
+            "ignored_numbers": self.ignored_numbers,
             "unverifiable_ratio": self.unverifiable_ratio,
+            "unsourced_ratio": self.unsourced_ratio,
+            "coverage": self.coverage,
             "hallucination_rate": self.hallucination_rate,
             "claims": self.claims,
+            "unsourced_items": self.unsourced[:20],
+            "contradictions": self.contradictions,
             "issues": self.issues,
             "corrections": self.corrections,
         }
@@ -208,13 +318,26 @@ class VerificationReport:
         lines = [
             f"交叉校验结论：{'通过' if self.passed else '未通过'}｜"
             f"可信度：{self.confidence_level}｜"
-            f"共核对 {len(self.claims)} 处数值：一致 {self.n_supported}、"
-            f"矛盾 {self.n_mismatch}、无法核实 {self.n_unverifiable}｜"
+            f"共核对 {self.total_numbers} 个数字：一致 {self.n_supported}、"
+            f"矛盾 {self.n_mismatch}、无法核实 {self.n_unverifiable}、"
+            f"无来源 {len(self.unsourced)}｜"
+            f"可核实覆盖率 {self.coverage:.0%}｜"
             f"疑似幻觉率 {self.hallucination_rate:.1%}",
         ]
         for c in self.claims:
             mark = {"supported": "✓", "mismatch": "✗", "unverifiable": "?"}[c["status"]]
             lines.append(f"  [{mark}] {c['label']}：{c['note']}")
+        if self.unsourced:
+            lines.append(f"无来源数字（{len(self.unsourced)} 个，需人工复核）：")
+            for item in self.unsourced[:10]:
+                lines.append(f"  [!] {item['raw']}：{item['note']}")
+        if self.contradictions:
+            lines.append("报告内部自相矛盾：")
+            for item in self.contradictions:
+                lines.append(f"  [≠] {item['label']}：文中出现 {item['values']}")
+        if self.confidence_reasons:
+            lines.append("可信度下调原因：")
+            lines.extend(f"  - {r}" for r in self.confidence_reasons)
         if self.corrections:
             lines.append("纠错（重写时必须采用下列核实值）：")
             lines.extend(f"  - {x}" for x in self.corrections)
@@ -232,20 +355,143 @@ class CrossVerifier:
     def verify(self, text: str, fact_base: FactBase) -> VerificationReport:
         claims = self._extract_claims(text)
         report = VerificationReport()
+        claimed_positions: List[int] = []
         for claim in claims:
-            fact = fact_base.get(claim.metric)
+            fact = self._fact_for(claim, fact_base)
             report.claims.append(self._judge(claim, fact))
+            if claim.pos >= 0:
+                claimed_positions.append(claim.pos)
         # 同一指标多处出现时全部保留（任一矛盾都要被发现）
         report.claims.sort(key=lambda x: (x["metric"], x.get("claimed_raw", "")))
         for item in report.claims:
             if item["status"] == "mismatch":
                 report.issues.append(f"{item['label']}：{item['note']}")
                 report.corrections.append(item["correction"])
+
+        # U1：与词典无关的"全量数字归因"——把没被检查的数字明确标为"无来源"
+        self._classify_unattributed(text, fact_base, claimed_positions, report)
+        # U3：报告内部自相矛盾
+        report.contradictions = self._find_contradictions(report.claims)
         return report
+
+    # -- U2：分期归因（"2024年营收…"不与最新期混用）-------------------
+    _YEAR_IN_CTX = re.compile(r"(20\d{2})(?:\s*[-/年]\s*(\d{1,2}))?")
+
+    def _fact_for(self, claim: Claim, fact_base: FactBase):
+        if fact_base is None:
+            return None
+        ctx = claim.context or ""
+        m = self._YEAR_IN_CTX.search(ctx)
+        if m:
+            period = m.group(1)
+            if m.group(2):
+                try:
+                    period = f"{m.group(1)}-{int(m.group(2)):02d}"
+                except (TypeError, ValueError):
+                    period = m.group(1)
+            fact = fact_base.get_for_period(claim.metric, period)
+            if fact is not None and fact.value is not None:
+                return fact
+        return fact_base.get(claim.metric)
+
+    # -- U1：未归因数字 -------------------------------------------------
+    def _classify_unattributed(self, text: str, fact_base: FactBase,
+                               claimed_positions: List[int],
+                               report: VerificationReport) -> None:
+        """把报告里**所有**财务数字与已归因位置对齐，剩下的标为 unsourced。
+
+        这是把"抽查指标词典"升级为"全量数字分类"的关键：
+        词典覆盖不到的数字不再被静默放过，而是进入 ``unsourced`` 清单并拉低覆盖率。
+        """
+        if not text:
+            return
+        all_facts = list(getattr(fact_base, "facts", {}).values()) if fact_base else []
+        for mention in extract_numbers(text):
+            if mention.kind == KIND_BARE:
+                report.ignored_numbers += 1
+                continue
+            if any(abs(mention.start - pos) <= 2 for pos in claimed_positions):
+                continue
+            hint = ""
+            for fact in all_facts:
+                if fact is None or fact.value is None:
+                    continue
+                if self._value_matches_fact(mention, fact):
+                    hint = f"数值与事实库中的「{fact.label}」一致，但文中未指明指标"
+                    break
+            report.unsourced.append({
+                "raw": mention.raw,
+                "value": format_number(mention.value, mention.kind),
+                "kind": mention.kind,
+                "context": mention.context.strip(),
+                "hint": hint,
+                "note": ("该数字未归因到任何已知指标，也未在事实库中找到对应值，"
+                         "无法核实（需人工复核）" if not hint
+                         else "该数字未被指标词典归因：" + hint),
+            })
+
+    def _value_matches_fact(self, mention, fact) -> bool:
+        """未归因数字是否与事实库某条数值吻合（仅作为提示，不据此判定为一致）。"""
+        try:
+            value = float(fact.value)
+        except (TypeError, ValueError):
+            return False
+        if mention.kind == KIND_PERCENT:
+            return fact.unit == "percent" and abs(mention.value - value) <= self.pct_tol + _FLOAT_EPS
+        if mention.kind == KIND_AMOUNT:
+            if fact.unit != "yuan":
+                return False
+            denom = abs(value) or 1e-9
+            return abs(mention.value - value) / denom <= self.rel_tol + _FLOAT_EPS
+        if mention.kind in (KIND_PRICE, KIND_MULTIPLE):
+            if fact.unit not in ("price", "yuan"):
+                return False
+            denom = abs(value) or 1e-9
+            return abs(mention.value - value) / denom <= self.rel_tol + _FLOAT_EPS
+        return False
+
+    # -- U3：报告内部自相矛盾 -------------------------------------------
+    def _find_contradictions(self, claims: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """同一指标在文中出现多次、且数值超出容差地不一致 -> 自相矛盾。"""
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for c in claims:
+            grouped.setdefault(c["metric"], []).append(c)
+
+        out: List[Dict[str, Any]] = []
+        for metric, items in grouped.items():
+            if len(items) < 2:
+                continue
+            values = [it.get("claimed") for it in items if it.get("claimed") is not None]
+            if len(values) < 2:
+                continue
+            kind = items[0].get("kind")
+            conflicts = []
+            for i in range(len(values)):
+                for j in range(i + 1, len(values)):
+                    if not self._values_close(values[i], values[j], kind):
+                        conflicts.append((values[i], values[j]))
+            if len(conflicts) >= 1:
+                out.append({
+                    "metric": metric,
+                    "label": items[0]["label"],
+                    "values": sorted({round(v, 4) for v in values}),
+                    "count": len(items),
+                    "note": f"同一指标在文中出现 {len(items)} 次，数值不一致："
+                            + "、".join(str(v) for v in sorted({round(v, 4) for v in values})),
+                })
+        out.sort(key=lambda x: x["metric"])
+        return out
+
+    def _values_close(self, a: float, b: float, kind: Optional[str]) -> bool:
+        if kind == "percent":
+            return abs(a - b) <= self.pct_tol + _FLOAT_EPS
+        denom = abs(b) or 1e-9
+        return abs(a - b) / denom <= self.rel_tol + _FLOAT_EPS
 
     # ------------------------------------------------------------------
     def _judge(self, claim: Claim, fact) -> Dict[str, Any]:
-        base = {"metric": claim.metric, "label": claim.label, "claimed_raw": claim.raw}
+        base = {"metric": claim.metric, "label": claim.label, "kind": claim.kind,
+                "claimed_raw": claim.raw, "context": claim.context}
         if fact is None or fact.value is None:
             return {**base, "status": "unverifiable", "claimed": claim.claimed,
                     "fact": None, "note": "事实库未覆盖该指标，无法证实（需人工/更多数据源确认）",
@@ -343,11 +589,14 @@ class CrossVerifier:
                 value, raw, offset = self._read_value(window, spec.kind, spec.unit_required)
                 if value is None:
                     continue
+                pos = end + offset
+                ctx = text[max(0, pos - 40): pos + 40]
                 # 以数值在原文中的位置去重，避免长短别名重复抽同一条
-                out.setdefault(end + offset, Claim(spec.key, spec.label, spec.kind, value, raw))
+                out.setdefault(pos, Claim(spec.key, spec.label, spec.kind, value, raw,
+                                          pos=pos, context=ctx))
         return list(out.values())
 
-    # -- 同比指标：锚点 + 紧邻数字 + 禁止跨指标 ------------------------
+    # -- 增速指标（同比/环比）：锚点 + 紧邻数字 + 禁止跨指标 -----------
     def _find_yoy(self, text: str, spec: MetricSpec,
                   spans: List[Tuple[int, int, str]]) -> List[Claim]:
         anchors = _YOY_ANCHORS.get(spec.key, spec.aliases)
@@ -362,7 +611,7 @@ class CrossVerifier:
             return []
 
         out: Dict[int, Claim] = {}
-        for ym in _YOY_RE.finditer(text):
+        for ym in _growth_re(spec.growth_words).finditer(text):
             yoy_start = ym.start()
             # 从最近的锚点往前找，第一个“不跨指标、不跨句/百分号”的锚点被采用
             chosen = None
@@ -390,7 +639,9 @@ class CrossVerifier:
                 num = -num
             pos = ym.start(2)
             raw = text[ym.start():ym.end()].strip()
-            out.setdefault(pos, Claim(spec.key, spec.label, "percent", num, raw))
+            out.setdefault(pos, Claim(spec.key, spec.label, "percent", num, raw,
+                                      pos=pos,
+                                      context=text[max(0, pos - 40): pos + 40]))
         return list(out.values())
 
     # -- 数值解析 -----------------------------------------------------

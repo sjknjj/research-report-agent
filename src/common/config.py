@@ -105,6 +105,7 @@ class Settings:
     language: str = "zh"
     max_review_rounds: int = 1
     deep_search_rounds: int = 2              # 深挖模式下的补充检索轮数
+    debate_rounds: int = 2                   # 多空辩论的互相反驳轮数（README 承诺两轮）
     output_dir: str = "output"
     export_formats: List[str] = field(default_factory=lambda: ["md", "html"])
     log_level: str = "INFO"
@@ -190,6 +191,7 @@ def load_settings(
     settings.language = _env_str("REPORT_LANGUAGE", settings.language)
     settings.max_review_rounds = _env_int("REVIEW_MAX_ROUNDS", settings.max_review_rounds)
     settings.deep_search_rounds = _env_int("DEEP_SEARCH_ROUNDS", settings.deep_search_rounds)
+    settings.debate_rounds = _env_int("DEBATE_ROUNDS", settings.debate_rounds)
     settings.output_dir = _env_str("OUTPUT_DIR", settings.output_dir)
     if os.environ.get("EXPORT_FORMATS"):
         settings.export_formats = _env_list("EXPORT_FORMATS", settings.export_formats)

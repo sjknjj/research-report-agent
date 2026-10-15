@@ -342,12 +342,18 @@ def build_assistant_markdown(
 
     if verification:
         lines += ["## 交叉校验报告（反幻觉）", ""]
+        total_numbers = verification.get("total_numbers", verification.get("total_claims", 0))
+        coverage = verification.get("coverage")
+        coverage_text = f"{coverage:.0%}" if isinstance(coverage, (int, float)) else "—"
         lines.append(
             f"**结论：{'通过' if verification.get('passed') else '未通过'}**　"
-            f"共核对 {verification.get('total_claims', 0)} 处数值——"
+            f"可信度：{verification.get('confidence_level', '—')}　"
+            f"共核对 {total_numbers} 个数字——"
             f"一致 {verification.get('supported', 0)}、"
             f"矛盾 {verification.get('mismatch', 0)}、"
             f"待核 {verification.get('unverifiable', 0)}、"
+            f"**无来源 {verification.get('unsourced', 0)}**；"
+            f"可核实覆盖率 **{coverage_text}**；"
             f"疑似幻觉率 {verification.get('hallucination_rate', 0):.1%}"
         )
         lines.append("")
@@ -359,6 +365,41 @@ def build_assistant_markdown(
                 note = _md_cell(claim.get("note", ""))
                 lines.append(f"| {label} | {mark} | {note} |")
             lines.append("")
+
+        # U1：无来源数字（词典覆盖不到、也未在事实库中找到对应值）必须显式列出
+        unsourced_items = verification.get("unsourced_items") or []
+        if unsourced_items:
+            lines.append(
+                f"**无来源数字（{verification.get('unsourced', len(unsourced_items))} 个，"
+                f"未能归因到事实库，需人工复核）：**"
+            )
+            lines.append("")
+            lines += ["| 数字 | 上下文 | 说明 |", "| --- | --- | --- |"]
+            for item in unsourced_items:
+                lines.append(
+                    f"| {_md_cell(item.get('raw', ''))} "
+                    f"| {_md_cell((item.get('context') or '')[:60])} "
+                    f"| {_md_cell(item.get('note', ''))} |"
+                )
+            lines.append("")
+
+        # U3：报告内部自相矛盾
+        contradictions = verification.get("contradictions") or []
+        if contradictions:
+            lines.append("**报告内部自相矛盾：**")
+            lines.append("")
+            for item in contradictions:
+                lines.append(f"- ⚠️ {_md_cell(item.get('note', ''))}")
+            lines.append("")
+
+        # U4：可信度下调原因
+        reasons = verification.get("confidence_reasons") or []
+        if reasons:
+            lines.append("**可信度下调原因：**")
+            lines.append("")
+            lines += [f"- {_md_cell(r)}" for r in reasons]
+            lines.append("")
+
         if verification.get("corrections"):
             lines.append("**自动纠错记录：**")
             lines += [f"- {c}" for c in verification["corrections"]]
