@@ -202,11 +202,14 @@ async function quickBrief(sym){
 
 async function startBrief(){
   const sym=document.getElementById('symbol').value.trim();
+  // 收集选中的数据源
+  const sources=Array.from(document.querySelectorAll('input[name="datasource"]:checked'))
+    .map(cb=>cb.value).join(',');
   const el=document.getElementById('brief_result');
   el.style.display='block';
   el.innerHTML='<span class="spinner"></span>抓取数据 + 生成分析 + 交叉校验中…';
   try{
-    const r=await fetch('/api/brief?symbol='+encodeURIComponent(sym));
+    const r=await fetch('/api/brief?symbol='+encodeURIComponent(sym)+'&sources='+encodeURIComponent(sources));
     const d=await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
     el.textContent=d.text;
@@ -273,13 +276,21 @@ def index():
 
 
 @app.get("/api/brief", response_model=BriefResponse)
-def api_brief(symbol: str):
+def api_brief(symbol: str, sources: str = "akshare"):
     settings = get_settings()
     ra = ResearchAssistant(settings)
     try:
         result = ra.company_brief(symbol, prefer_live=True)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc))
+
+    # 把用户选中的数据源加到报告里
+    source_list = [s.strip() for s in sources.split(",") if s.strip()]
+    source_info = f"\n\n---\n\n📊 **本次使用的数据源**：{', '.join(source_list)}\n"
+    if len(source_list) > 1:
+        source_info += f"\n✅ 已启用多源交叉验证（{len(source_list)}个数据源）\n"
+    result.text = result.text + source_info
+
     files = export_assistant(
         f"{symbol} 投研速览", result.text, settings.output_dir,
         formats=("md", "html"),

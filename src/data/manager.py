@@ -55,42 +55,61 @@ class DataSourceManager:
 
         raise DataSourceError(f"所有数据源都取数失败：{last_exc}")
 
-    def cross_check_numbers(self, data_a: Dict[str, Any], data_b: Dict[str, Any]) -> List[str]:
+    def cross_check_numbers(self, *datas: Dict[str, Any], threshold: float = 0.01) -> List[str]:
         """
-        多源交叉验证：比对两个数据源的关键数字，不一致就返回警告列表。
+        多源交叉验证：比对多个数据源的关键数字，不一致就返回警告列表。
 
-        :param data_a: 第一个数据源的清洗后数据
-        :param data_b: 第二个数据源的清洗后数据
+        :param datas: 多个数据源的清洗后数据（可以传任意多个）
+        :param threshold: 误差阈值，超过就算不一致（默认 1%）
         :return: 数据不一致的警告列表
         """
-        if not self.enable_cross_check or not data_a or not data_b:
+        if not self.enable_cross_check or len(datas) < 2:
             return []
 
         warnings = []
-        # 比对几个关键指标（相对误差 > 1% 就算不一致）
+        # 关键指标（相对误差 > threshold 就算不一致）
         key_fields = [
             ("revenue", "营收"),
             ("net_profit", "净利润"),
+            ("revenue_yoy", "营收同比"),
+            ("net_profit_yoy", "净利润同比"),
+            ("gross_margin", "毛利率"),
+            ("net_margin", "净利率"),
+            ("roe", "ROE"),
             ("pe_ratio", "市盈率"),
             ("pb_ratio", "市净率"),
         ]
 
         for key, label in key_fields:
-            val_a = data_a.get(key)
-            val_b = data_b.get(key)
-            if val_a is None or val_b is None:
-                continue
-            try:
-                a, b = float(val_a), float(val_b)
-                if a == 0 or b == 0:
+            # 收集所有数据源的这个字段的值
+            values = []
+            for i, data in enumerate(datas):
+                val = data.get(key)
+                if val is None:
                     continue
-                rel_diff = abs(a - b) / max(abs(a), abs(b))
-                if rel_diff > 0.01:  # 误差 > 1%
-                    warnings.append(
-                        f"⚠️ 数据不一致：{label} 数据源A={a:.2f}，数据源B={b:.2f}（误差 {rel_diff:.1%}）"
-                    )
-            except (TypeError, ValueError):
+                try:
+                    values.append((f"数据源{i+1}", float(val)))
+                except (TypeError, ValueError):
+                    continue
+
+            # 少于两个值就没法比对
+            if len(values) < 2:
                 continue
+
+            # 计算最大值和最小值的相对误差
+            nums = [v[1] for v in values]
+            max_val = max(nums)
+            min_val = min(nums)
+            if max_val == 0:
+                continue
+            rel_diff = abs(max_val - min_val) / abs(max_val)
+
+            if rel_diff > threshold:
+                # 格式化每个数据源的值
+                values_str = "，".join(f"{name}={val:.2f}" for name, val in values)
+                warnings.append(
+                    f"⚠️ 数据不一致：{label}（{values_str}）最大最小误差 {rel_diff:.1%}"
+                )
 
         return warnings
 
