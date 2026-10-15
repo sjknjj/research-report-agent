@@ -8,6 +8,28 @@
 
 ---
 
+## 🚀 v3.3 体验大升级（新功能 + 易用性提升）
+
+### ⚡ 性能提升
+| 新功能 | 说明 | 效果 |
+| --- | --- | --- |
+| **本地数据缓存** | 同一天同一只股票的数据自动缓存到 `cache/` 目录 | 第二次生成速度从 30 秒 → 2 秒，LLM 成本也降了 |
+
+### 🖥️ 新增命令
+| 命令 | 功能 | 示例 |
+| --- | --- | --- |
+| `python main.py history` | 查看所有历史生成的报告 | `python main.py history --keyword 600519` |
+| `python main.py monitor` | 盘中实时监控自选股涨跌，达阈值自动推送 | `python main.py monitor --threshold 5 --interval 60` |
+
+### 💬 易用性提升
+| 优化项 | 说明 |
+| --- | --- |
+| **友好错误提示** | 缺 API Key / 网络超时 / 代码格式错 等常见错误，直接告诉你怎么修 |
+| **CLI 彩色输出** | 标题、校验结果、成功/失败都用颜色区分，终端更清晰 |
+| **配置示例文件** | 新增 `config.example.yaml`，所有配置一目了然 |
+
+---
+
 ## 🔧 v3.2 架构重构（代码瘦身 + 可维护性提升）
 
 本次重构围绕**消除重复代码、统一公共能力**展开，代码总行数减少约 300 行，同时保持所有功能完全不变：
@@ -244,6 +266,14 @@ python main.py report 低空经济产业链分析 --deep          # 开启递归
 
 # 5) 启动 Web 服务（FastAPI，自带前端页面）
 python main.py serve                                      # 默认 http://127.0.0.1:8000
+
+# 6) 历史报告检索
+python main.py history                                    # 列出所有历史报告
+python main.py history --keyword 600519                   # 按关键词搜索
+
+# 7) 盘中实时监控（达涨跌幅阈值自动推送）
+python main.py monitor                                    # 默认±5%，60秒轮询
+python main.py monitor --threshold 3 --interval 30        # ±3%，30秒一次
 
 # 通用参数：--mode {auto,online,offline}  --model X  --output DIR  --deep
 ```

@@ -9,7 +9,7 @@ import pandas as pd
 
 from ..analysis.indicators import analyze_technicals
 from ..common.logger import get_logger
-from . import sample_data
+from . import cache, sample_data
 from .cleaner import (
     clean_financial,
     clean_info,
@@ -82,10 +82,12 @@ class DataService:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         prefer_live: bool = True,
+        use_cache: bool = True,
     ) -> CompanyBundle:
         """获取公司行情 + 财务 + 资讯数据包。
 
         :param prefer_live: 优先实时抓取；失败自动回退样例。为 False 时直接用样例。
+        :param use_cache: 是否启用当天缓存（同一天同一只股票直接复用）
         """
         code = self.source.normalize_symbol(symbol)
         end_date = end_date or datetime.now().strftime("%Y%m%d")
@@ -93,9 +95,31 @@ class DataService:
             datetime.now() - timedelta(days=365)
         ).strftime("%Y%m%d")
 
+        # 先查当天缓存
+        if prefer_live and use_cache:
+            cached = cache.get_cached_bundle(code)
+            if cached:
+                return CompanyBundle(
+                    symbol=cached["symbol"],
+                    name=cached["name"],
+                    source=cached["source"],
+                    as_of=cached["as_of"],
+                    info=cached["info"],
+                    news=cached["news"],
+                    price_summary=cached["price_summary"],
+                    financial_summary=cached["financial_summary"],
+                    valuation=cached["valuation"],
+                    fund_flow=cached["fund_flow"],
+                    technicals=cached["technicals"],
+                )
+
         if prefer_live:
             try:
-                return self._live_bundle(code, start_date, end_date)
+                bundle = self._live_bundle(code, start_date, end_date)
+                # 写入缓存（只存 summary 级别，不存 DataFrame）
+                if use_cache:
+                    cache.save_cached_bundle(code, bundle.to_dict())
+                return bundle
             except DataSourceError as exc:
                 logger.warning("实时数据抓取失败，回退到离线样例：%s", exc)
         return self._sample_bundle(code)

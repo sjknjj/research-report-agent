@@ -37,6 +37,22 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# 轻量 ANSI 颜色输出（不依赖第三方库）
+class _C:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    CYAN = "\033[36m"
+
+
+def _color(text: str, *styles: str) -> str:
+    return "".join(styles) + text + _C.RESET
+
+
 from src.agent.orchestrator import ResearchOrchestrator  # noqa: E402
 from src.common.config import load_settings  # noqa: E402
 from src.common.logger import setup_logging, get_logger  # noqa: E402
@@ -51,7 +67,7 @@ from src.services.research_assistant import ResearchAssistant  # noqa: E402
 from src.verify.facts import FactBase  # noqa: E402
 from src.verify.verifier import CrossVerifier  # noqa: E402
 
-_COMMANDS = {"brief", "announce", "industry", "report", "compare", "demo", "serve", "daily"}
+_COMMANDS = {"brief", "announce", "industry", "report", "compare", "demo", "serve", "daily", "history", "monitor"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -104,6 +120,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_daily = sub.add_parser("daily", parents=[common], help="自选股批量跑 + 推送（配合 GitHub Actions 定时）")
     p_daily.add_argument("--file", default="watchlist.txt", help="自选股列表文件路径")
     p_daily.add_argument("--push", action="store_true", default=True, help="生成完自动推送（默认开启）")
+
+    p_hist = sub.add_parser("history", parents=[common], help="查看历史生成的报告")
+    p_hist.add_argument("--keyword", default="", help="按关键词搜索（如股票代码、主题）")
+    p_hist.add_argument("--limit", type=int, default=20, help="最多显示多少条")
+
+    p_mon = sub.add_parser("monitor", parents=[common], help="盘中实时监控自选股涨跌，达阈值推送")
+    p_mon.add_argument("--file", default="watchlist.txt", help="自选股列表文件")
+    p_mon.add_argument("--threshold", type=float, default=5.0, help="涨跌幅阈值百分比（默认5%%）")
+    p_mon.add_argument("--interval", type=int, default=60, help="轮询间隔秒数（默认60秒）")
+    p_mon.add_argument("--push", action="store_true", default=True, help="触发时推送通知")
     return parser
 
 
@@ -159,14 +185,20 @@ def cmd_brief(args) -> int:
         chart_html=chart_html, extra_html=result.extra.get("chain_graph", ""),
     )
     v = result.verification or {}
-    print("\n" + "=" * 64)
-    print(title)
-    print(f"交叉校验：{'通过' if v.get('passed') else '未通过'}｜"
-          f"一致 {v.get('supported', 0)}、矛盾 {v.get('mismatch', 0)}、"
-          f"待核 {v.get('unverifiable', 0)}、幻觉率 {v.get('hallucination_rate', 0):.1%}")
+    print()
+    print(_color("=" * 64, _C.DIM))
+    print(_color(title, _C.BOLD, _C.CYAN))
+    pass_color = _C.GREEN if v.get('passed') else _C.RED
+    print(
+        _color("交叉校验：", _C.BOLD) +
+        _color(f"{'通过' if v.get('passed') else '未通过'}", pass_color) +
+        f"｜一致 {v.get('supported', 0)}、矛盾 {v.get('mismatch', 0)}、"
+        f"待核 {v.get('unverifiable', 0)}、幻觉率 " +
+        _color(f"{v.get('hallucination_rate', 0):.1%}", _C.YELLOW)
+    )
     for path in files:
-        print("已生成：", path)
-    print("=" * 64)
+        print(_color("✅ 已生成：", _C.GREEN) + str(path))
+    print(_color("=" * 64, _C.DIM))
     logger.info("公司速览完成")
 
     # 3.0：可选推送飞书/企业微信
@@ -371,6 +403,115 @@ def cmd_daily(args) -> int:
     return 0 if fail == 0 else 1
 
 
+def cmd_history(args) -> int:
+    """查看历史生成的报告（output 目录）。"""
+    settings = _settings(args)
+    output_dir = Path(settings.output_dir)
+    if not output_dir.is_absolute():
+        from src.common.config import PROJECT_ROOT
+        output_dir = PROJECT_ROOT / output_dir
+
+    if not output_dir.exists():
+        print("还没有生成过报告。")
+        return 0
+
+    # 收集所有 .md 文件（按修改时间倒序）
+    files = sorted(
+        [f for f in output_dir.glob("*.md")],
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
+
+    # 关键词过滤
+    keyword = args.keyword.lower()
+    if keyword:
+        files = [f for f in files if keyword in f.stem.lower()]
+
+    if not files:
+        print("没有找到匹配的历史报告。")
+        return 0
+
+    print(f"\n共找到 {len(files)} 份历史报告（显示前 {args.limit} 条）：\n")
+    print(_color(f"{'日期':<20} {'文件名':<50}", _C.DIM))
+    print(_color("-" * 70, _C.DIM))
+
+    from datetime import datetime
+    for f in files[: args.limit]:
+        mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        name = f.stem[:48] + ("..." if len(f.stem) > 48 else "")
+        print(f"{mtime:<20} {name:<50}")
+
+    print()
+    print("💡 提示：用 --keyword 搜索（如 python main.py history --keyword 600519）")
+    print(f"   报告目录：{output_dir.resolve()}")
+    return 0
+
+
+def cmd_monitor(args) -> int:
+    """盘中实时监控自选股涨跌，涨跌幅超过阈值时推送通知。"""
+    import time
+    settings = _settings(args)
+
+    # 读取自选股列表
+    watchlist_file = Path(args.file)
+    if not watchlist_file.exists():
+        print(f"自选股列表文件不存在：{watchlist_file}")
+        return 1
+
+    symbols = []
+    for line in watchlist_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            symbols.append(line)
+
+    if not symbols:
+        print("自选股列表为空")
+        return 1
+
+    print(_color(f"开始监控 {len(symbols)} 只自选股（阈值 ±{args.threshold}%，间隔 {args.interval} 秒）", _C.BOLD, _C.CYAN))
+    print("=" * 64)
+
+    from src.data.sources import AKShareSource
+    from src.notify import push_brief_result
+
+    source = AKShareSource()
+    alerted = set()  # 已经触发过的，避免重复推送
+
+    try:
+        while True:
+            for symbol in symbols:
+                try:
+                    # 抓实时行情快照
+                    import akshare as ak
+                    df = ak.stock_zh_a_spot_em()
+                    row = df[df["代码"] == symbol]
+                    if row.empty:
+                        continue
+
+                    price = float(row.iloc[0]["最新价"])
+                    pct = float(row.iloc[0]["涨跌幅"])
+                    name = row.iloc[0]["名称"]
+
+                    # 检查阈值
+                    key = f"{symbol}_{int(abs(pct) // args.threshold)}"
+                    if abs(pct) >= args.threshold and key not in alerted:
+                        alerted.add(key)
+                        direction = "上涨" if pct > 0 else "下跌"
+                        msg = f"⚡ **{name}（{symbol}）{direction}预警**\n\n涨跌幅：{pct:+.2f}%\n最新价：{price:.2f}"
+                        print(_color(f"[{name}] {direction} {pct:+.2f}%", _C.YELLOW, _C.BOLD))
+
+                        if args.push:
+                            push_brief_result(f"{name} 涨跌预警", msg, {})
+
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[{symbol}] 抓取失败：{exc}")
+
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print("\n监控已停止。")
+    return 0
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # 向后兼容：未写子命令时，默认按 report 处理
@@ -392,15 +533,57 @@ def main(argv=None) -> int:
         "demo": cmd_demo,
         "serve": cmd_serve,
         "daily": cmd_daily,
+        "history": cmd_history,
+        "monitor": cmd_monitor,
     }
     try:
         return handlers[args.command](args)
     except KeyboardInterrupt:
+        print("\n已取消。")
         return 130
     except Exception as exc:  # noqa: BLE001
-        get_logger("main").error("执行失败：%s", exc)
-        get_logger("main").error("可加 --sample / --mode offline 先跑离线案例排查。")
+        _print_friendly_error(exc)
         return 1
+
+
+def _print_friendly_error(exc: Exception) -> None:
+    """把常见错误翻译成用户能看懂的修复建议。"""
+    msg = str(exc).lower()
+    print("\n❌ 执行失败：", str(exc))
+    print("")
+
+    # 1. 缺 LLM key
+    if "api key" in msg or "llm_api_key" in msg or "authorization" in msg or "401" in msg:
+        print("💡 修复建议：")
+        print("   1. 检查 .env 文件里的 LLM_API_KEY 是否配置正确")
+        print("   2. 或者加 --sample 参数先跑离线演示（无需密钥）")
+        print("   3. 离线模式：python main.py demo")
+
+    # 2. 网络超时 / 连接失败
+    elif "timeout" in msg or "connection" in msg or "network" in msg or "timed out" in msg:
+        print("💡 修复建议：")
+        print("   1. 检查网络是否能访问 API 服务")
+        print("   2. 如果在国内，确认 LLM_BASE_URL 是否能直连")
+        print("   3. 或者加 --sample 参数用离线模式")
+
+    # 3. 股票代码格式错
+    elif "symbol" in msg and ("format" in msg or "invalid" in msg or "normalize" in msg):
+        print("💡 修复建议：")
+        print("   股票代码应该是 6 位数字，如：600519（茅台）、000858（五粮液）")
+        print("   示例：python main.py brief 600519")
+
+    # 4. 没装依赖
+    elif "modulenotfound" in msg or "no module named" in msg:
+        print("💡 修复建议：")
+        print("   缺少依赖包，请运行：pip install -r requirements.txt")
+        print("   如果还缺，看报错信息里的包名手动安装")
+
+    # 5. 其他未知错误
+    else:
+        print("💡 排查建议：")
+        print("   1. 加 --sample 先跑离线模式，如果能跑通说明是网络/API问题")
+        print("   2. 加 --mode offline 强制离线，先验证基础功能是否正常")
+        print("   3. 查看 README.md 的常见问题章节")
 
 
 if __name__ == "__main__":
