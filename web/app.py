@@ -129,7 +129,10 @@ border-radius:6px;font-size:13px;cursor:pointer;}
 
 <div class="tabs">
   <div class="tab active" onclick="switchTab('brief')">🏠 首页</div>
+  <div class="tab" onclick="switchTab('compare')">📊 多公司对比</div>
   <div class="tab" onclick="switchTab('report')">📝 深度研报</div>
+  <div class="tab" onclick="switchTab('announce')">📢 公告提炼</div>
+  <div class="tab" onclick="switchTab('stats')">📈 统计</div>
   <div class="tab" onclick="switchTab('watchlist')">⭐ 自选股</div>
 </div>
 
@@ -198,6 +201,19 @@ border-radius:6px;font-size:13px;cursor:pointer;}
   </div>
 </div>
 
+<!-- 多公司对比 Tab -->
+<div id="tab-compare" class="tab-content">
+  <div class="card">
+    <h3 style="text-align:center;font-size:20px;margin-bottom:16px;">输入多个股票代码，横向对比</h3>
+    <div class="row" style="max-width:600px;margin:0 auto;">
+      <input id="compare_symbols" placeholder="如 600519,000858,000568" value="600519,000858,000568" style="font-size:16px;padding:14px;">
+      <button onclick="startCompare()" style="font-size:16px;padding:14px 24px;">开始对比</button>
+    </div>
+    <div class="tip" style="text-align:center;margin-top:8px;">PE/PB/增速/ROE/技术面横向对比，自动排序</div>
+    <div id="compare_result" class="result" style="display:none;"></div>
+  </div>
+</div>
+
 <!-- 深度研报 Tab -->
 <div id="tab-report" class="tab-content">
   <div class="card">
@@ -212,6 +228,33 @@ border-radius:6px;font-size:13px;cursor:pointer;}
     <div class="tip">流程：规划 → 检索 → 逐章分析 → 多空辩论 → 撰写 → 审校（并行生成）</div>
     <div id="report_progress" style="margin-top:16px;font-size:13px;color:#6b7280;"></div>
     <div id="report_result" class="result" style="display:none;"></div>
+  </div>
+</div>
+
+<!-- 公告提炼 Tab -->
+<div id="tab-announce" class="tab-content">
+  <div class="card">
+    <h3 style="text-align:center;font-size:20px;margin-bottom:16px;">粘贴公告文本，自动提炼要点</h3>
+    <div class="row" style="max-width:800px;margin:0 auto;">
+      <textarea id="announce_text" placeholder="粘贴公告文本..." style="flex:1;height:200px;padding:12px;border-radius:8px;border:1px solid #d0d5dd;font-size:14px;"></textarea>
+    </div>
+    <div class="row" style="max-width:800px;margin:12px auto 0;">
+      <input id="announce_symbol" placeholder="关联股票代码（可选）" style="flex:1;">
+      <button onclick="startAnnounce()" style="padding:12px 24px;">提炼要点</button>
+    </div>
+    <div class="tip" style="text-align:center;margin-top:8px;">自动提炼要点 + 跟财报交叉校验数字</div>
+    <div id="announce_result" class="result" style="display:none;"></div>
+  </div>
+</div>
+
+<!-- 统计 Tab -->
+<div id="tab-stats" class="tab-content">
+  <div class="card">
+    <h3 style="text-align:center;font-size:20px;margin-bottom:16px;">幻觉率历史统计</h3>
+    <div style="text-align:center;">
+      <button onclick="loadStats()" style="padding:12px 24px;">查看统计</button>
+    </div>
+    <div id="stats_result" class="result" style="display:none;"></div>
   </div>
 </div>
 
@@ -300,6 +343,57 @@ function downloadPdf(){
   const sources = Array.from(document.querySelectorAll('input[name="datasource"]:checked'))
     .map(cb=>cb.value).join(',');
   window.open('/api/brief/pdf?symbol='+encodeURIComponent(sym)+'&sources='+encodeURIComponent(sources), '_blank');
+}
+
+// 多公司对比
+async function startCompare(){
+  const symbols = document.getElementById('compare_symbols').value.trim();
+  if(!symbols){alert('请输入至少2个股票代码');return;}
+  const el = document.getElementById('compare_result');
+  el.style.display = 'block';
+  el.innerHTML = '<span class="spinner"></span>抓取数据 + 横向对比中…';
+  try{
+    const r = await fetch('/api/compare?symbols='+encodeURIComponent(symbols));
+    const d = await r.json();
+    if(d.error){el.textContent='错误：'+d.error;return;}
+    el.innerHTML = marked.parse(d.text);
+  }catch(e){el.textContent='请求失败：'+e;}
+}
+
+// 公告提炼
+async function startAnnounce(){
+  const text = document.getElementById('announce_text').value.trim();
+  const symbol = document.getElementById('announce_symbol').value.trim();
+  if(!text){alert('请粘贴公告文本');return;}
+  const el = document.getElementById('announce_result');
+  el.style.display = 'block';
+  el.innerHTML = '<span class="spinner"></span>提炼要点 + 交叉校验中…';
+  try{
+    const params = new URLSearchParams();
+    params.append('text', text);
+    if(symbol) params.append('symbol', symbol);
+    const r = await fetch('/api/announce?'+params.toString(), {method:'POST'});
+    const d = await r.json();
+    if(d.error){el.textContent='错误：'+d.error;return;}
+    el.innerHTML = marked.parse(d.text);
+    if(d.verification && d.verification.passed !== undefined){
+      const v = d.verification;
+      el.innerHTML += `<hr><p style="color:#6b7280;font-size:13px;">交叉校验：${v.passed?'✅ 通过':'⚠️ 未通过'}｜幻觉率${(v.hallucination_rate*100).toFixed(1)}%</p>`;
+    }
+  }catch(e){el.textContent='请求失败：'+e;}
+}
+
+// 统计
+async function loadStats(){
+  const el = document.getElementById('stats_result');
+  el.style.display = 'block';
+  el.innerHTML = '<span class="spinner"></span>加载统计中…';
+  try{
+    const r = await fetch('/api/stats');
+    const d = await r.json();
+    if(d.error){el.textContent='错误：'+d.error;return;}
+    el.innerHTML = marked.parse(d.text);
+  }catch(e){el.textContent='请求失败：'+e;}
 }
 
 // 自动刷新
@@ -434,6 +528,51 @@ def api_brief_pdf(symbol: str, sources: str = "akshare"):
         filename=f"{symbol}_brief.pdf",
         media_type="application/pdf",
     )
+
+
+@app.get("/api/compare")
+def api_compare(symbols: str, by: str = "profit_yoy"):
+    """多公司对比。symbols 是逗号分隔的股票代码，如 600519,000858,000568"""
+    from src.analysis.comparison import ComparisonService
+
+    symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    if len(symbol_list) < 2:
+        raise HTTPException(status_code=400, detail="至少需要2个股票代码")
+
+    try:
+        service = ComparisonService()
+        rows = service.compare(symbol_list, prefer_live=True)
+        markdown = service.render_markdown(rows, by=by)
+        return {"text": markdown, "count": len(rows)}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/announce")
+def api_announce(text: str, symbol: str = "", title: str = "公司公告"):
+    """公告提炼。"""
+    from src.services.research_assistant import ResearchAssistant
+
+    settings = get_settings()
+    ra = ResearchAssistant(settings)
+    try:
+        result = ra.extract_announcement(text, title=title, symbol=symbol or None)
+        return {"text": result.text, "verification": result.verification or {}}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/stats")
+def api_stats():
+    """幻觉率历史统计。"""
+    from src.verify.stats import HallucinationStats
+
+    try:
+        stats = HallucinationStats()
+        text = stats.render_markdown()
+        return {"text": text}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/report", response_model=ReportResponse)
