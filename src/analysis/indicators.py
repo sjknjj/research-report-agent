@@ -19,6 +19,10 @@ def calc_rsi(close: pd.Series, period=14):
     avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
+    # 单边上涨时 avg_loss == 0，RSI 按定义应为 100；
+    # 此前用 fillna(50) 会把它误报成中性，导致强势股永远不触发超买信号。
+    rsi = rsi.where(avg_loss != 0, 100.0)
+    # 仅预热期（样本不足）用中性值兜底
     return rsi.fillna(50)
 
 
@@ -35,14 +39,16 @@ def calc_kdj(high: pd.Series, low: pd.Series, close: pd.Series, n=9):
 
 def calc_boll(close: pd.Series, n=20, k=2):
     mid = close.rolling(n, min_periods=1).mean()
-    std = close.rolling(n, min_periods=1).std()
+    # 布林带标准定义使用总体标准差（ddof=0）；pandas 默认 ddof=1 会让带宽偏大
+    std = close.rolling(n, min_periods=1).std(ddof=0)
     upper = mid + k * std
     lower = mid - k * std
     return upper, mid, lower
 
 
 def analyze_technicals(price_df: pd.DataFrame) -> dict:
-    if price_df is None or len(price_df) < 30:
+    # MACD(12,26,9) 的 DEA 需要 26+9 根左右才稳定，30 根会给出噪声信号
+    if price_df is None or len(price_df) < 35:
         return {}
     close = price_df["close"]
     high = price_df["high"] if "high" in price_df else close
@@ -143,27 +149,39 @@ def _detect_candlestick_patterns(price_df: pd.DataFrame, last: int) -> list:
     elif pct < -3:
         patterns.append(f"大阴线（跌幅 {abs(pct):.1f}%，空头强势）")
 
-    # 3. 双底（W底）— 最近 20 天内有两个相近的低点
+    # 3. 双底（W底）— 最近 20 天内有两个**相互分离**的相近低点，且中间有像样反弹
+    #
+    # 修复点：旧实现 `recent_low[min1_idx:]` 把第一个低点本身也包含进"第二个低点"的
+    # 搜索区间，导致 min2 == min1 恒成立（条件退化为"窗口最低点不在末尾3根内"），
+    # 单调上涨的序列也会被报成双底。现在改为按**位置**切分，并要求：
+    #   两个低点分离 + 幅度接近 + 中间反弹至少 3%。
     if last >= 20:
-        recent_low = low.iloc[last-20:last]
-        min1 = recent_low.min()
-        min1_idx = recent_low.idxmin()
-        # 找第二个低点（在第一个低点之后）
-        after_first = low.iloc[last-20:last][min1_idx:]
-        if len(after_first) > 3:
-            min2 = after_first.min()
-            if abs(min1 - min2) / min1 < 0.03 and min2 > min1 * 0.98:
+        win_low = low.iloc[last-20:last].reset_index(drop=True)
+        pos1 = int(win_low.values.argmin())
+        min1 = float(win_low.iloc[pos1])
+        after = win_low.iloc[pos1+1:]
+        if len(after) >= 3 and min1 > 0:
+            pos2 = pos1 + 1 + int(after.values.argmin())
+            min2 = float(win_low.iloc[pos2])
+            rebound = float(win_low.iloc[pos1:pos2+1].max())
+            if (abs(min1 - min2) / abs(min1) < 0.03
+                    and min2 >= min1 * 0.98
+                    and rebound >= min1 * 1.03):
                 patterns.append("疑似双底（W底）形态，可能见底反转")
 
-    # 4. 双顶（M头）— 最近 20 天内有两个相近的高点
+    # 4. 双顶（M头）— 最近 20 天内有两个**相互分离**的相近高点，且中间有明显回落
     if last >= 20:
-        recent_high = high.iloc[last-20:last]
-        max1 = recent_high.max()
-        max1_idx = recent_high.idxmax()
-        after_first = high.iloc[last-20:last][max1_idx:]
-        if len(after_first) > 3:
-            max2 = after_first.max()
-            if abs(max1 - max2) / max1 < 0.03 and max2 < max1 * 1.02:
+        win_high = high.iloc[last-20:last].reset_index(drop=True)
+        pos1h = int(win_high.values.argmax())
+        max1 = float(win_high.iloc[pos1h])
+        after_h = win_high.iloc[pos1h+1:]
+        if len(after_h) >= 3 and max1 > 0:
+            pos2h = pos1h + 1 + int(after_h.values.argmax())
+            max2 = float(win_high.iloc[pos2h])
+            pullback = float(win_high.iloc[pos1h:pos2h+1].min())
+            if (abs(max1 - max2) / abs(max1) < 0.03
+                    and max2 <= max1 * 1.02
+                    and pullback <= max1 * 0.97):
                 patterns.append("疑似双顶（M头）形态，可能见顶回落")
 
     # 5. 看涨吞没（前一天阴线，今天大阳线完全包住昨天）

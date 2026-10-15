@@ -202,12 +202,30 @@ CHAIN_DB = {
 }
 
 
+def _normalize_code(symbol: str) -> str:
+    """把各种写法的代码归一化，便于与 CHAIN_DB 里的 6 位代码比较。
+
+    支持 `600519` / `600519.SH` / `sh600519` / `2382.HK` / `AAPL` 等写法。
+    """
+    s = str(symbol or "").strip().upper()
+    for sep in (".", " ", "/"):
+        if sep in s:
+            s = s.split(sep)[0]
+    for prefix in ("SH", "SZ", "BJ"):
+        if s.startswith(prefix) and s[len(prefix):].isdigit():
+            return s[len(prefix):]
+    return s
+
+
 def find_chain(symbol: str, name: str = "") -> dict | None:
-    code = str(symbol).strip()
+    code = _normalize_code(symbol)
+    clean_name = str(name or "").strip()
     for chain_name, layers in CHAIN_DB.items():
         for layer in ("upstream", "midstream", "downstream"):
             for comp in layers[layer]:
-                if comp["code"] == code or (name and comp["name"] == name):
+                if comp["code"] and _normalize_code(comp["code"]) == code:
+                    return {"chain": chain_name, "position": layer, **layers}
+                if clean_name and comp["name"] == clean_name:
                     return {"chain": chain_name, "position": layer, **layers}
     return None
 

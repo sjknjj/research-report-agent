@@ -9,14 +9,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 import sys
-import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+logger = logging.getLogger("web.app")
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -27,18 +30,70 @@ from src.common.config import get_settings
 from src.export.exporter import export_assistant, export_report
 from src.services.research_assistant import ResearchAssistant
 
-app = FastAPI(title="研报辅助 Agent 3.0", version="3.0")
+app = FastAPI(title="研报辅助 Agent 3.9", version="3.9")
 
-# 3.0：任务状态存储（生产环境应换Redis，这里用内存dict演示）
-_tasks: Dict[str, dict] = {}
+# ---------------------------------------------------------------------------
+# Web「设置」页的持久化配置
+#
+# 旧版本这里只有一个纯前端提示（saveSettings 什么都没保存），属于虚假功能。
+# 现在真正落盘到 output/web_settings.json，并在启动时写入进程环境变量，
+# 使 notify / monitor 等模块读取到用户配置。
+# ---------------------------------------------------------------------------
+WEB_SETTINGS_PATH = PROJECT_ROOT / "output" / "web_settings.json"
+
+# 环境变量名 -> 前端字段名（带 env 前缀的字段会同步到 os.environ）
+_WEB_SETTINGS_KEYS = {
+    "feishu_webhook_url": "FEISHU_WEBHOOK_URL",
+    "feishu_secret": "FEISHU_SECRET",
+    "wecom_webhook_key": "WECOM_WEBHOOK_KEY",
+    "telegram_bot_token": "TELEGRAM_BOT_TOKEN",
+    "telegram_chat_id": "TELEGRAM_CHAT_ID",
+}
+_SECRET_FIELDS = {"feishu_secret", "wecom_webhook_key", "telegram_bot_token"}
+
+
+def _load_web_settings() -> Dict[str, str]:
+    if not WEB_SETTINGS_PATH.exists():
+        return {}
+    try:
+        data = json.loads(WEB_SETTINGS_PATH.read_text(encoding="utf-8"))
+        return {k: str(v) for k, v in data.items() if isinstance(v, (str, int, float))}
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("读取 Web 设置失败：%s", exc)
+        return {}
+
+
+def _apply_web_settings(values: Dict[str, str]) -> None:
+    """把设置写进进程环境变量，让 notify / monitor 等模块直接生效。"""
+    for field, env_name in _WEB_SETTINGS_KEYS.items():
+        value = values.get(field)
+        if value:
+            os.environ[env_name] = str(value)
+
+
+def _save_web_settings(values: Dict[str, str]) -> None:
+    WEB_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    merged = _load_web_settings()
+    merged.update({k: v for k, v in values.items() if v is not None})
+    WEB_SETTINGS_PATH.write_text(
+        json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    _apply_web_settings(merged)
+
+
+# 启动即生效（命令行/邮件/webhook 等渠道共用同一份配置）
+_apply_web_settings(_load_web_settings())
 
 
 _PAGE = """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>研报辅助 Agent 3.0</title>
-<!-- 引入 Markdown 渲染库 -->
+<title>研报辅助 Agent 3.9</title>
+<!-- Markdown 渲染 + HTML 消毒（LLM/新闻内容属于外部输入，必须先消毒再插入 DOM） -->
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<!-- 多公司对比图表（雷达图 / 估值分位）用 -->
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
 <style>
 *{box-sizing:border-box;}
 body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
@@ -194,30 +249,6 @@ border-radius:6px;font-size:13px;cursor:pointer;}
       </div>
     </div>
 
-    <!-- 搜索引擎选择 -->
-    <div style="margin:20px 0;padding:12px;background:#f8f9fa;border-radius:8px;">
-      <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:#374151;">
-        🔍 搜索引擎选择（国内推荐用百度/必应，不用配 key）
-      </div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;">
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
-          <input type="checkbox" name="search_engine" value="baidu" checked> 百度（推荐，国内不用key）
-        </label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
-          <input type="checkbox" name="search_engine" value="bing" checked> 必应（国内不用key）
-        </label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
-          <input type="checkbox" name="search_engine" value="duckduckgo"> DuckDuckGo（国内被墙）
-        </label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
-          <input type="checkbox" name="search_engine" value="tavily"> Tavily（配key推荐）
-        </label>
-      </div>
-      <div style="font-size:12px;color:#6b7280;margin-top:8px;">
-        💡 生成研报/速览时会自动用这些搜索引擎搜资料
-      </div>
-    </div>
-
     <div class="tip" style="text-align:center;">行情 + 财务 + 技术面 + 反幻觉校验 + 多空辩论 + 决策仪表盘</div>
 
     <!-- 报告操作按钮（结果出来后显示） -->
@@ -226,6 +257,8 @@ border-radius:6px;font-size:13px;cursor:pointer;}
       <button class="secondary" onclick="addToWatchlist()" style="font-size:13px;padding:6px 12px;">⭐ 加入自选</button>
       <button class="secondary" id="autoRefreshBtn" onclick="toggleAutoRefresh()" style="font-size:13px;padding:6px 12px;">🔄 自动刷新</button>
     </div>
+    <!-- 自动刷新只更新行情快照，不会重新调用大模型 -->
+    <div id="quote_line" style="font-size:14px;color:#0f4c81;margin:6px 0;font-weight:600;"></div>
     <div id="autoRefreshStatus" style="font-size:12px;color:#6b7280;margin-top:4px;"></div>
 
     <div id="brief_result" class="result" style="display:none;"></div>
@@ -243,6 +276,7 @@ border-radius:6px;font-size:13px;cursor:pointer;}
     <div class="tip" style="text-align:center;margin-top:8px;">PE/PB/增速/ROE/技术面横向对比，自动排序</div>
     <div id="compare_result" class="result" style="display:none;"></div>
   </div>
+  <div id="compare_charts"></div>
 </div>
 
 <!-- 行业分析 Tab -->
@@ -269,6 +303,31 @@ border-radius:6px;font-size:13px;cursor:pointer;}
     <div class="row" style="max-width:600px;margin:12px auto 0;">
       <label class="tip" style="margin:0;font-size:13px;"><input type="checkbox" id="deep"> 递归深挖检索（更慢但更全）</label>
     </div>
+
+    <!-- 搜索引擎选择：只有深度研报会用到检索，所以放在这里并真正生效 -->
+    <div style="margin:16px 0;padding:12px;background:#f8f9fa;border-radius:8px;">
+      <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:#374151;">
+        🔍 搜索引擎（多选时按顺序尝试；国内推荐百度/必应，不用配 key）
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="search_engine" value="baidu" checked> 百度（推荐）
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="search_engine" value="bing"> 必应
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="search_engine" value="duckduckgo"> DuckDuckGo（国内被墙）
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="search_engine" value="tavily"> Tavily（需配 key）
+        </label>
+      </div>
+      <div style="font-size:12px;color:#6b7280;margin-top:8px;">
+        💡 勾选多个时，按「百度 → 必应 → DuckDuckGo → Tavily」的顺序逐级回退
+      </div>
+    </div>
+
     <div class="tip">流程：规划 → 检索 → 逐章分析 → 多空辩论 → 撰写 → 审校（并行生成）</div>
     <div id="report_progress" style="margin-top:16px;font-size:13px;color:#6b7280;"></div>
     <div id="report_result" class="result" style="display:none;"></div>
@@ -497,17 +556,35 @@ border-radius:6px;font-size:13px;cursor:pointer;}
 </div>
 
 <script>
+// 安全的 Markdown 渲染：报告正文含大模型输出与新闻标题（外部输入），
+// 直接 marked.parse + innerHTML 会被注入 <script>/<img onerror> 等，必须消毒。
+function renderMD(src){
+  const html = marked.parse(src || '');
+  if (window.DOMPurify) {
+    return DOMPurify.sanitize(html, {USE_PROFILES:{html:true}});
+  }
+  // 兜底：没有加载到 DOMPurify 时退化为纯文本，绝不直接插入未消毒 HTML
+  const div=document.createElement('div');
+  div.textContent = src || '';
+  return div.innerHTML;
+}
+function escapeHTML(s){
+  return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
 function switchTab(name){
   document.querySelectorAll('.tab').forEach(t=>{
     t.classList.toggle('active', t.getAttribute('onclick').includes("'"+name+"'"));
   });
   document.querySelectorAll('.tab-content').forEach((c)=>c.classList.remove('active'));
   document.getElementById('tab-'+name).classList.add('active');
+  if(name==='settings'){ loadSettings(); }
 }
 
 // 自选股本地存储
 function getWatchlist(){
-  return JSON.parse(localStorage.getItem('watchlist')||'[]');
+  try { return JSON.parse(localStorage.getItem('watchlist')||'[]'); }
+  catch(e){ return []; }
 }
 function setWatchlist(list){
   localStorage.setItem('watchlist', JSON.stringify(list));
@@ -529,9 +606,16 @@ function renderWatchlist(){
   const empty=document.getElementById('watchlist_empty');
   if(list.length===0){el.innerHTML='';empty.style.display='block';return;}
   empty.style.display='none';
-  el.innerHTML=list.map(s=>
-    `<span class="watch-item" onclick="quickBrief('${s}')" title="点击生成速览">${s}</span>`
-  ).join('');
+  // 之前的模板字符串把 localStorage 内容直接拼进 onclick，含引号即可注入脚本
+  el.innerHTML='';
+  list.forEach(sym=>{
+    const span=document.createElement('span');
+    span.className='watch-item';
+    span.title='点击生成速览';
+    span.textContent=sym;
+    span.addEventListener('click', ()=>quickBrief(sym));
+    el.appendChild(span);
+  });
 }
 renderWatchlist();
 
@@ -553,7 +637,7 @@ async function startBrief(){
     const r=await fetch('/api/brief?symbol='+encodeURIComponent(sym)+'&sources='+encodeURIComponent(sources));
     const d=await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
-    el.innerHTML = marked.parse(d.text || '');
+    el.innerHTML = renderMD(d.text || '');
     if(d.verification && d.verification.passed !== undefined){
       const v=d.verification;
       el.innerHTML += `<hr><p style="color:#6b7280;font-size:13px;">交叉校验：${v.passed?'✅ 通过':'⚠️ 未通过'}｜一致${v.supported}、矛盾${v.mismatch}、幻觉率${(v.hallucination_rate*100).toFixed(1)}%</p>`;
@@ -576,14 +660,40 @@ async function startCompare(){
   const symbols = document.getElementById('compare_symbols').value.trim();
   if(!symbols){alert('请输入至少2个股票代码');return;}
   const el = document.getElementById('compare_result');
+  const chartWrap = document.getElementById('compare_charts');
   el.style.display = 'block';
   el.innerHTML = '<span class="spinner"></span>抓取数据 + 横向对比中…';
+  if(chartWrap){chartWrap.innerHTML='';}
   try{
     const r = await fetch('/api/compare?symbols='+encodeURIComponent(symbols));
     const d = await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
-    el.innerHTML = marked.parse(d.text || '');
+    el.innerHTML = renderMD(d.text || '');
+    renderCompareCharts(d.charts);
   }catch(e){el.textContent='请求失败：'+e;}
+}
+
+// 用 plotly.js 渲染后端返回的图表 JSON（雷达图 / 估值分位）
+function renderCompareCharts(charts){
+  const wrap = document.getElementById('compare_charts');
+  if(!wrap || !charts || !window.Plotly){ return; }
+  wrap.innerHTML = '';
+  [['radar','多公司对比雷达图'],['valuation','估值分位图']].forEach(([key,title])=>{
+    const fig = charts[key];
+    if(!fig){ return; }
+    const card = document.createElement('div');
+    card.className = 'card';
+    const h = document.createElement('h3');
+    h.textContent = title;
+    const plot = document.createElement('div');
+    card.appendChild(h); card.appendChild(plot);
+    wrap.appendChild(card);
+    try{
+      Plotly.newPlot(plot, fig.data || [], fig.layout || {}, {responsive:true, displaylogo:false});
+    }catch(e){
+      plot.textContent = '图表渲染失败：'+e;
+    }
+  });
 }
 
 // 公告提炼
@@ -601,7 +711,7 @@ async function startAnnounce(){
     const r = await fetch('/api/announce?'+params.toString(), {method:'POST'});
     const d = await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
-    el.innerHTML = marked.parse(d.text || '');
+    el.innerHTML = renderMD(d.text || '');
     if(d.verification && d.verification.passed !== undefined){
       const v = d.verification;
       el.innerHTML += `<hr><p style="color:#6b7280;font-size:13px;">交叉校验：${v.passed?'✅ 通过':'⚠️ 未通过'}｜幻觉率${(v.hallucination_rate*100).toFixed(1)}%</p>`;
@@ -618,7 +728,7 @@ async function loadStats(){
     const r = await fetch('/api/stats');
     const d = await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
-    el.innerHTML = marked.parse(d.text || '');
+    el.innerHTML = renderMD(d.text || '');
   }catch(e){el.textContent='请求失败：'+e;}
 }
 
@@ -633,7 +743,7 @@ async function startSentiment(){
     const r = await fetch('/api/sentiment?symbol='+encodeURIComponent(symbol));
     const d = await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
-    el.innerHTML = marked.parse(d.text || '');
+    el.innerHTML = renderMD(d.text || '');
   }catch(e){el.textContent='请求失败：'+e;}
 }
 
@@ -648,7 +758,7 @@ async function startBacktest(){
     const r = await fetch('/api/backtest?symbol='+encodeURIComponent(symbol));
     const d = await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
-    el.innerHTML = marked.parse(d.text || '');
+    el.innerHTML = renderMD(d.text || '');
   }catch(e){el.textContent='请求失败：'+e;}
 }
 
@@ -663,7 +773,7 @@ async function startFactor(){
     const r = await fetch('/api/factor?symbol='+encodeURIComponent(symbol));
     const d = await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
-    el.innerHTML = marked.parse(d.text || '');
+    el.innerHTML = renderMD(d.text || '');
   }catch(e){el.textContent='请求失败：'+e;}
 }
 
@@ -678,33 +788,83 @@ async function startIndustry(){
     const r = await fetch('/api/industry?name='+encodeURIComponent(name));
     const d = await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
-    el.innerHTML = marked.parse(d.text || '');
+    el.innerHTML = renderMD(d.text || '');
   }catch(e){el.textContent='请求失败：'+e;}
 }
 
-// 保存设置
-function saveSettings(){
+// 保存设置（真正落盘到 output/web_settings.json）
+async function saveSettings(){
   const status = document.getElementById('settings_status');
-  status.textContent = '✅ 设置已保存（重启服务后生效）';
-  status.style.color = '#059669';
+  const payload = {
+    feishu_webhook_url: document.getElementById('feishu_webhook').value.trim(),
+    wecom_webhook_key: document.getElementById('wecom_key').value.trim(),
+    alert_up_pct: document.getElementById('alert_up').value,
+    alert_down_pct: document.getElementById('alert_down').value,
+  };
+  status.textContent = '保存中…';
+  status.style.color = '#6b7280';
+  try{
+    const r = await fetch('/api/settings', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const d = await r.json();
+    if(d.ok){
+      status.textContent = '✅ 已保存到 ' + d.config_file + '，推送渠道立即生效';
+      status.style.color = '#059669';
+    } else {
+      status.textContent = '保存失败：' + (d.detail || '未知错误');
+      status.style.color = '#dc2626';
+    }
+  }catch(e){
+    status.textContent = '保存失败：' + e;
+    status.style.color = '#dc2626';
+  }
 }
 
-// 自动刷新
+// 打开设置页时回填已保存的值
+async function loadSettings(){
+  try{
+    const r = await fetch('/api/settings');
+    const d = await r.json();
+    if(d.feishu_webhook_url) document.getElementById('feishu_webhook').value = d.feishu_webhook_url;
+    if(d.wecom_webhook_key) document.getElementById('wecom_key').value = d.wecom_webhook_key;
+    if(d.alert_up_pct) document.getElementById('alert_up').value = d.alert_up_pct;
+    if(d.alert_down_pct) document.getElementById('alert_down').value = d.alert_down_pct;
+  }catch(e){ /* 读取失败时保持空白即可 */ }
+}
+
+// 自动刷新：只拉取实时行情快照，不再重新跑整条大模型流水线
 let autoRefreshTimer = null;
+async function refreshQuote(){
+  const sym = document.getElementById('symbol').value.trim();
+  const line = document.getElementById('quote_line');
+  if(!sym || !line){ return; }
+  try{
+    const r = await fetch('/api/quote?symbol='+encodeURIComponent(sym));
+    const d = await r.json();
+    if(d.detail){ line.textContent = '行情刷新失败：'+d.detail; return; }
+    const sign = (d.pct_change||0) >= 0 ? '+' : '';
+    line.textContent = (d.name||d.symbol)+' '+d.price+' 元  '+sign+d.pct_change+'%';
+    line.style.color = (d.pct_change||0) >= 0 ? '#dc2626' : '#059669';
+  }catch(e){
+    line.textContent = '行情刷新失败：'+e;
+  }
+}
 function toggleAutoRefresh(){
   const btn = document.getElementById('autoRefreshBtn');
   const status = document.getElementById('autoRefreshStatus');
   if(autoRefreshTimer){
     clearInterval(autoRefreshTimer);
     autoRefreshTimer = null;
-    btn.textContent = '▶ 自动刷新';
+    btn.textContent = '🔄 自动刷新';
     status.textContent = '';
   } else {
     btn.textContent = '⏸ 停止刷新';
-    status.textContent = '每 10 秒自动刷新一次';
-    autoRefreshTimer = setInterval(() => {
-      startBrief();
-    }, 10000);
+    status.textContent = '每 10 秒刷新一次实时行情（不会重复调用大模型）';
+    refreshQuote();
+    autoRefreshTimer = setInterval(refreshQuote, 10000);
   }
 }
 
@@ -712,28 +872,30 @@ async function startReport(){
   const topic=document.getElementById('topic').value.trim();
   if(!topic){alert('请输入研究主题');return;}
   const deep=document.getElementById('deep').checked;
+  // 把勾选的搜索引擎按优先级串起来，取第一个发给后端
+  const engines=Array.from(document.querySelectorAll('input[name="search_engine"]:checked'))
+    .map(cb=>cb.value);
+  const provider = engines.length ? engines[0] : 'auto';
   const progEl=document.getElementById('report_progress');
   const resultEl=document.getElementById('report_result');
   resultEl.style.display='block';
   resultEl.innerHTML='';
 
-  const steps=['① 规划提纲','② 检索资料','③ 逐章分析（并行）','④ 多空辩论','⑤ 撰写初稿（并行）','⑥ 审校'];
-  let stepIdx=0;
+  let stepLog=[];
+  progEl.innerHTML='<span class="spinner"></span> 正在启动流水线…';
 
-  const es=new EventSource('/api/report/stream?topic='+encodeURIComponent(topic)+'&deep='+deep);
-  progEl.innerHTML='<span class="spinner"></span> '+steps[0];
+  const es=new EventSource('/api/report/stream?topic='+encodeURIComponent(topic)
+    +'&deep='+deep+'&provider='+encodeURIComponent(provider));
 
   es.onmessage=function(e){
     const data=JSON.parse(e.data);
     if(data.type==='step'){
-      stepIdx++;
-      if(stepIdx<steps.length){
-        progEl.innerHTML='<span class="spinner"></span> '+steps[stepIdx];
-      }
+      stepLog.push(data.name);
+      progEl.innerHTML='<span class="spinner"></span> 已完成：'+escapeHTML(stepLog.join(' → '));
     } else if(data.type==='done'){
       es.close();
-      progEl.innerHTML='✅ 生成完成';
-      resultEl.innerHTML = marked.parse(data.text || '');
+      progEl.innerHTML='✅ 生成完成（共 '+stepLog.length+' 个阶段）';
+      resultEl.innerHTML = renderMD(data.text || '');
     } else if(data.type==='error'){
       es.close();
       progEl.innerHTML='❌ 出错了';
@@ -774,10 +936,19 @@ def api_brief(symbol: str, sources: str = "akshare"):
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc))
 
-    # 把用户选中的数据源加到报告里
-    source_info = f"\n\n---\n\n📊 **本次使用的数据源**：{', '.join(source_list)}\n"
-    if len(source_list) > 1:
-        source_info += f"\n✅ 已启用多源交叉验证（{len(source_list)}个数据源）\n"
+    # 如实标注数据来源：旧版本无条件写"✅ 已启用多源交叉验证"，
+    # 但多源管理器当时根本没有接线，属于虚假声明。
+    used_source = "-"
+    if isinstance(result.bundle, dict):
+        used_source = str(result.bundle.get("source", "-"))
+    source_info = f"\n\n---\n\n📊 **本次实际数据来源**：{used_source}"
+    if source_list:
+        source_info += f"（本次勾选：{', '.join(source_list)}）"
+    source_info += "\n"
+
+    conflict_text = _render_cross_source_conflicts(result)
+    if conflict_text:
+        source_info += conflict_text
     result.text = result.text + source_info
 
     files = export_assistant(
@@ -785,12 +956,60 @@ def api_brief(symbol: str, sources: str = "akshare"):
         formats=("md", "html"),
         verification=result.verification,
         fact_pack=result.fact_pack,
+        chart_html=_build_brief_charts(result),
+        extra_html=result.extra.get("chain_graph", "") if result.extra else "",
     )
     return BriefResponse(
         text=result.text,
         verification=result.verification or {},
         output_file=str(files[0]) if files else "",
     )
+
+
+def _build_brief_charts(result) -> str:
+    """拼装公司速览的图表：K线 + 财务趋势 + PE/PB 估值仪表盘。
+
+    这些图表此前在仓库里"定义了但没有任何调用点"，README 却宣称有。
+    现在统一在这里生成（缓存命中也有效，因为 price_clean/financial_clean 会被还原）。
+    """
+    raw = getattr(result, "raw_bundle", None)
+    if raw is None:
+        return ""
+    from src.export import charts as chart_mod
+
+    parts: list = []
+    try:
+        if getattr(raw, "price_clean", None) is not None:
+            parts.append(chart_mod.kline_with_volume(raw.price_clean) or "")
+        if getattr(raw, "financial_clean", None) is not None:
+            parts.append(chart_mod.financial_trend_chart(raw.financial_clean) or "")
+        valuation = getattr(raw, "valuation", None) or {}
+        parts.append(
+            chart_mod.valuation_gauge(valuation.get("pe"), valuation.get("pb")) or ""
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("速览图表生成失败（不影响报告）：%s", exc)
+    return "".join(p for p in parts if p)
+
+
+def _render_cross_source_conflicts(result) -> str:
+    """把多源交叉验证的实际结果渲染出来。
+
+    只有在 DataService 真正跑了多源交叉验证并带回结果时才输出，
+    没有结果就返回空字符串——不再凭空宣称"已启用交叉验证"。
+    """
+    extra = getattr(result, "extra", None) or {}
+    check = extra.get("cross_check")
+    if not check:
+        return ""
+    lines = ["\n🔎 **多源交叉验证结果**\n"]
+    conflicts = check.get("conflicts") if isinstance(check, dict) else None
+    if conflicts:
+        for item in conflicts:
+            lines.append(f"- ⚠️ 数据不一致：{item}")
+    else:
+        lines.append("- ✅ 所选数据源之间未发现数字冲突")
+    return "\n".join(lines) + "\n"
 
 
 @app.get("/api/brief/pdf")
@@ -826,17 +1045,41 @@ def api_brief_pdf(symbol: str, sources: str = "akshare"):
 @app.get("/api/compare")
 def api_compare(symbols: str, by: str = "profit_yoy"):
     """多公司对比。symbols 是逗号分隔的股票代码，如 600519,000858,000568"""
-    from src.analysis.comparison import ComparisonService
+    from src.analysis.comparison import (
+        ComparisonService,
+        radar_chart_html,
+        radar_figure_json,
+        valuation_figure_json,
+        valuation_percentile_html,
+    )
 
     symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
     if len(symbol_list) < 2:
         raise HTTPException(status_code=400, detail="至少需要2个股票代码")
 
+    settings = get_settings()
     try:
         service = ComparisonService()
         rows = service.compare(symbol_list, prefer_live=True)
         markdown = service.render_markdown(rows, by=by)
-        return {"text": markdown, "count": len(rows)}
+
+        # 图表：一份 JSON 给前端用 plotly.js 渲染，一份 HTML 写进导出文件
+        charts = {
+            "radar": radar_figure_json(rows),
+            "valuation": valuation_figure_json(rows),
+        }
+        chart_html = ""
+        try:
+            chart_html = radar_chart_html(rows) + valuation_percentile_html(rows)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("对比图表生成失败（不影响表格）：%s", exc)
+
+        export_assistant(
+            f"多公司对比_{len(rows)}家", markdown, settings.output_dir,
+            formats=("md", "html"), chart_html=chart_html,
+            meta_lines=[f"排序维度：{by}", f"公司数：{len(rows)}"],
+        )
+        return {"text": markdown, "count": len(rows), "charts": charts}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -880,33 +1123,44 @@ def api_sentiment(symbol: str):
         # 先获取公司的新闻
         bundle = ra.data.get_company_bundle(symbol, prefer_live=True)
         news_list = bundle.news[:20] if bundle.news else []
-        
+
         if not news_list:
             return {"text": f"# {symbol} 情绪面分析\n\n暂无新闻数据，无法分析情绪。"}
-        
-        # 调用真实的情绪分析
+
+        # analyze_sentiment 返回的是规范化结构：
+        # overall / score / positive / negative / neutral / *_ratio / *_news / summary / analyzed
         result = analyze_sentiment(news_list, ra.llm)
-        
-        # 格式化输出
-        text = f"""# {symbol} 情绪面分析
 
-## 新闻情绪概览
+        text = "".join([
+            f"# {symbol} 情绪面分析\n\n",
+            "## 新闻情绪概览\n\n",
+            f"- **分析新闻数**：{result.get('news_count', len(news_list))} 篇\n",
+            f"- **整体情绪**：{result.get('overall', '中性')}\n",
+            f"- **情绪评分**：{result.get('score', 50):.1f} / 100\n",
+            f"- **正面/负面/中性**：{result.get('positive', 0)} / "
+            f"{result.get('negative', 0)} / {result.get('neutral', 0)} 篇\n",
+            f"- **正面占比**：{result.get('positive_ratio', 0) * 100:.1f}%\n",
+            f"- **负面占比**：{result.get('negative_ratio', 0) * 100:.1f}%\n\n",
+            f"**一句话总结**：{result.get('summary', '—')}\n\n",
+        ])
 
-- **分析新闻数**：{len(news_list)} 篇
-- **整体情绪**：{result.get('overall', '中性')}
-- **正面占比**：{result.get('positive_ratio', 0)*100:.1f}%
-- **负面占比**：{result.get('negative_ratio', 0)*100:.1f}%
+        if not result.get("analyzed", False):
+            text += "> ⚠️ 本次未获得模型分析结果（可能处于离线演示模式），以上为中性占位。\n\n"
 
-## 主要正面新闻
-
-"""
-        for news in result.get('positive_news', [])[:5]:
-            text += f"- {news.get('title', '')}\n"
-        
+        text += "## 主要正面新闻\n\n"
+        positive_news = result.get("positive_news", [])
+        text += "".join(f"- {n.get('title', '')}\n" for n in positive_news[:5]) or "- 无\n"
         text += "\n## 主要负面新闻\n\n"
-        for news in result.get('negative_news', [])[:5]:
-            text += f"- {news.get('title', '')}\n"
-        
+        negative_news = result.get("negative_news", [])
+        text += "".join(f"- {n.get('title', '')}\n" for n in negative_news[:5]) or "- 无\n"
+
+        # 模型没有逐条标注时，退回展示原始新闻标题，避免"主要新闻"永远为空
+        if not positive_news and not negative_news:
+            text += "\n## 最近新闻标题\n\n"
+            text += "".join(
+                f"- {n.get('time', '')} {n.get('title', '')}\n" for n in news_list[:5]
+            )
+
         text += "\n> ⚠️ 情绪面分析仅供参考，不构成投资建议。\n"
         return {"text": text}
     except Exception as exc:  # noqa: BLE001
@@ -922,44 +1176,51 @@ def api_backtest(symbol: str, days: int = 60):
     settings = get_settings()
     ra = ResearchAssistant(settings)
     try:
-        # 先获取K线数据
+        # 注意：CompanyBundle 里清洗后的行情 DataFrame 字段名是 price_clean（不是 price_df）
         bundle = ra.data.get_company_bundle(symbol, prefer_live=True)
-        price_df = bundle.price_df
-        
+        price_df = getattr(bundle, "price_clean", None)
+
         if price_df is None or len(price_df) == 0:
             return {"text": f"# {symbol} 回测\n\n暂无K线数据，无法回测。"}
-        
-        # 只取最近 days 天
+
         price_df = price_df.tail(days)
-        
-        # 调用真实的回测
         result = backtest_macd(price_df)
-        
-        # 格式化输出
+
+        if result.get("error"):
+            return {"text": f"# {symbol} 回测\n\n{result['error']}。"}
+
+        # backtest_macd 返回的比率已经是百分数，这里不能再 ×100
+        def _pct(key: str) -> str:
+            value = result.get(key)
+            return "—" if value is None else f"{value:.2f}%"
+
         text = f"""# {symbol} MACD 策略回测
 
 ## 回测设置
 
-- **回测周期**：最近 {len(price_df)} 天
-- **策略**：MACD 金叉买入，死叉卖出
+- **回测周期**：最近 {len(price_df)} 个交易日
+- **策略**：MACD 金叉买入 / 死叉卖出（信号次日成交）
 - **初始资金**：100,000 元
+- **交易成本**：买入佣金万2.5；卖出佣金万2.5 + 印花税千1
 
 ## 回测结果
 
 | 指标 | 数值 |
 |---|---|
-| 总交易次数 | {result.get('total_trades', 0)} 次 |
+| 完成交易次数 | {result.get('total_trades', 0)} 次 |
 | 盈利次数 | {result.get('win_trades', 0)} 次 |
 | 亏损次数 | {result.get('lose_trades', 0)} 次 |
-| 胜率 | {result.get('win_rate', 0)*100:.1f}% |
-| 总收益率 | {result.get('total_return', 0)*100:.2f}% |
-| 最大回撤 | {result.get('max_drawdown', 0)*100:.2f}% |
+| 胜率 | {_pct('win_rate')} |
+| 平均单笔收益 | {_pct('avg_profit_pct')} |
+| 策略累计收益 | {_pct('strategy_return_pct')} |
+| 同期买入持有 | {_pct('buy_hold_return_pct')} |
+| 最大回撤 | {_pct('max_drawdown_pct')} |
 
 ## 结论
 
 {result.get('summary', '回测完成。')}
 
-> ⚠️ 历史回测不代表未来收益，仅供参考。
+> ⚠️ 历史回测不代表未来收益，且未考虑滑点与流动性冲击，仅供参考。
 """
         return {"text": text}
     except Exception as exc:  # noqa: BLE001
@@ -975,25 +1236,36 @@ def api_factor(symbol: str):
     settings = get_settings()
     ra = ResearchAssistant(settings)
     try:
-        # 先获取公司数据
         bundle = ra.data.get_company_bundle(symbol, prefer_live=True)
-        
-        # 构造 CompanyRow
+
+        # 字段名必须与 CompanyRow 的声明一致；财务指标在
+        # financial_summary["latest"] 里，且键名带 _pct / _yuan 后缀。
+        fin = bundle.financial_summary.get("latest", {}) or {}
+        val = bundle.valuation or {}
+        price = bundle.price_summary or {}
+        tech = bundle.technicals or {}
+
         row = CompanyRow(
             symbol=bundle.symbol,
             name=bundle.name,
-            pe=bundle.valuation.get('pe'),
-            pb=bundle.valuation.get('pb'),
-            revenue_growth=bundle.financial_summary.get('revenue_yoy'),
-            profit_growth=bundle.financial_summary.get('profit_yoy'),
-            roe=bundle.financial_summary.get('roe'),
-            gross_margin=bundle.financial_summary.get('gross_margin'),
+            pe=val.get("pe"),
+            pb=val.get("pb"),
+            revenue=fin.get("revenue_yuan"),
+            net_profit=fin.get("net_profit_yuan"),
+            revenue_yoy=fin.get("revenue_yoy_pct"),
+            profit_yoy=fin.get("net_profit_yoy_pct"),
+            gross_margin=fin.get("gross_margin_pct"),
+            roe=fin.get("roe_pct"),
+            period_return=price.get("period_return_pct"),
+            trend=tech.get("trend", "") or "",
+            signal_count=len(tech.get("signals", []) or []),
         )
-        
-        # 调用真实的因子分析
-        factors = factor_analysis([row])
-        
-        # 格式化输出
+
+        results = factor_analysis([row])
+        if not results:
+            return {"text": f"# {symbol} 4 因子打分\n\n数据不足，无法计算因子。"}
+
+        item = results[0]
         text = f"""# {symbol} 4 因子打分
 
 ## 因子得分总览
@@ -1001,16 +1273,22 @@ def api_factor(symbol: str):
 | 因子 | 得分 | 说明 |
 |---|---|---|
 """
-        for f in factors[0].get('factors', []):
-            text += f"| {f.get('name', '')} | {f.get('score', 0):.1f} / 10 | {f.get('comment', '')} |\n"
-        
+        for f in item.get("factors", []):
+            score = f.get("score")
+            score_text = "数据不足" if score is None else f"{score:.1f} / 10"
+            text += f"| {f.get('name', '')} | {score_text} | {f.get('comment', '')} |\n"
+
+        total = item.get("total_score")
+        total_text = "数据不足" if total is None else f"{total:.1f} / 10"
         text += f"""
 ## 综合评分
 
-**综合得分：{factors[0].get('total_score', 0):.1f} / 10**
+**综合得分：{total_text}**
 
-> ⚠️ 因子打分仅供参考，不构成投资建议。
 """
+        if item.get("missing"):
+            text += f"> ⚠️ 缺失维度（未计入综合分）：{'、'.join(item['missing'])}\n\n"
+        text += "> ⚠️ 因子打分仅供参考，不构成投资建议。\n"
         return {"text": text}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc))
@@ -1052,44 +1330,167 @@ def api_report(topic: str, deep: bool = False):
 
 # 3.0：SSE 流式进度推送接口
 @app.get("/api/report/stream")
-async def api_report_stream(topic: str, deep: bool = False):
-    """Server-Sent Events 实时推送研报生成进度，完成后返回全文。"""
+async def api_report_stream(
+    topic: str, deep: bool = False, provider: Optional[str] = None
+):
+    """Server-Sent Events 实时推送研报生成进度，完成后返回全文。
+
+    旧实现把各步骤名先攒进列表、等整条流水线跑完才一次性吐给前端，
+    所以"实时进度"是假的（spinner 全程停在第一步）。现在改为：
+    工作线程每完成一步就通过线程安全队列立刻推给前端。
+    """
+    base_settings = get_settings()
+    if provider and provider != "auto":
+        # 用户在「深度研报」页选择的搜索引擎
+        base_settings.search_provider = provider
+
     async def generate():
-        settings = get_settings()
-        orchestrator = ResearchOrchestrator(settings)
+        loop = asyncio.get_running_loop()
+        queue: "asyncio.Queue[str]" = asyncio.Queue()
 
-        # 收集每步完成事件
-        step_events: List[str] = []
         def on_step(name: str, ctx):
-            step_events.append(name)
+            # 从工作线程投递到事件循环
+            loop.call_soon_threadsafe(queue.put_nowait, name)
 
-        # 在线程池中运行阻塞的流水线
-        loop = asyncio.get_event_loop()
+        orchestrator = ResearchOrchestrator(base_settings)
+        future = loop.run_in_executor(
+            None, lambda: orchestrator.run(topic, on_step=on_step, deep=deep)
+        )
+
+        def _drain() -> List[str]:
+            out = []
+            while not queue.empty():
+                out.append(queue.get_nowait())
+            return out
+
         try:
-            report = await loop.run_in_executor(
-                None, lambda: orchestrator.run(topic, on_step=on_step, deep=deep)
-            )
-            # 推送各步骤完成
-            for _ in step_events:
-                yield f"data: {{\"type\": \"step\"}}\n\n"
-                await asyncio.sleep(0.05)
-
-            files = export_report(report, settings.output_dir, ("md", "html"))
-            parts = [f"# {report.topic}", "", report.abstract, ""]
-            for s in report.sections:
-                parts.append(f"## {s.heading}\n{s.content}\n")
-            # 附加上下文统计
-            meta = report.meta or {}
-            if "elapsed_seconds" in meta:
-                parts.append(f"\n---\n*生成耗时 {meta['elapsed_seconds']}s｜"
-                             f"章节 {len(report.sections)}｜参考资料 {len(report.references)}*")
-
-            yield f"data: {{\"type\": \"done\", \"text\": {json.dumps(chr(10).join(parts))} }}\n\n"
+            while True:
+                for name in _drain():
+                    payload = json.dumps({"type": "step", "name": name}, ensure_ascii=False)
+                    yield f"data: {payload}\n\n"
+                if future.done():
+                    break
+                await asyncio.sleep(0.1)
+            for name in _drain():
+                payload = json.dumps({"type": "step", "name": name}, ensure_ascii=False)
+                yield f"data: {payload}\n\n"
+            report = await future
         except Exception as exc:  # noqa: BLE001
-            import json as _json
-            yield f"data: {{\"type\": \"error\", \"message\": {_json.dumps(str(exc))} }}\n\n"
+            payload = json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False)
+            yield f"data: {payload}\n\n"
+            return
+
+        try:
+            export_report(report, base_settings.output_dir, ("md", "html"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("研报导出失败（不影响返回文本）：%s", exc)
+
+        parts = [f"# {report.topic}", "", report.abstract, ""]
+        for s in report.sections:
+            parts.append(f"## {s.heading}\n{s.content}\n")
+        meta = report.meta or {}
+        if "elapsed_seconds" in meta:
+            parts.append(
+                f"\n---\n*生成耗时 {meta['elapsed_seconds']}s｜"
+                f"章节 {len(report.sections)}｜参考资料 {len(report.references)}*"
+            )
+
+        payload = json.dumps(
+            {"type": "done", "text": "\n".join(parts)}, ensure_ascii=False
+        )
+        yield f"data: {payload}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# 轻量实时行情：供「自动刷新」使用
+#
+# 旧实现每 10 秒调用一次 /api/brief —— 那会完整跑一遍 LLM 生成 + 语义校验 +
+# 三表抓取 + 向量库写入 + 导出文件，挂着页面过夜等于成千上万次付费调用。
+# 现在自动刷新只调用这个纯行情接口。
+# ---------------------------------------------------------------------------
+@app.get("/api/quote")
+def api_quote(symbol: str):
+    """返回单只股票的最新价与涨跌幅（不调用大模型、不写文件）。"""
+    from src.data.sources import AKShareSource, DataSourceError
+
+    source = AKShareSource()
+    try:
+        code = source.normalize_symbol(symbol)
+    except Exception:  # noqa: BLE001
+        code = symbol
+
+    try:
+        import akshare as ak
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"未安装 akshare：{exc}")
+
+    # 优先用轻量的单只股票盘口接口；失败再退回全市场快照
+    try:
+        df = ak.stock_bid_ask_em(symbol=code)
+        data = dict(zip(df["item"], df["value"]))
+        price = float(data.get("最新"))
+        pct = float(data.get("涨幅"))
+        name = str(data.get("名称", "") or code)
+        return {
+            "symbol": code,
+            "name": name,
+            "price": round(price, 3),
+            "pct_change": round(pct, 2),
+            "source": "eastmoney-bidask",
+        }
+    except Exception as first_exc:  # noqa: BLE001
+        logger.info("盘口接口失败，改用全市场快照：%s", first_exc)
+
+    try:
+        df = ak.stock_zh_a_spot_em()
+        row = df[df["代码"] == code]
+        if row.empty:
+            raise DataSourceError(f"未找到股票代码 {code} 的实时行情")
+        return {
+            "symbol": code,
+            "name": str(row.iloc[0]["名称"]),
+            "price": round(float(row.iloc[0]["最新价"]), 3),
+            "pct_change": round(float(row.iloc[0]["涨跌幅"]), 2),
+            "source": "eastmoney-spot",
+        }
+    except DataSourceError:
+        raise HTTPException(status_code=404, detail=f"未找到股票代码 {code}")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"实时行情获取失败：{exc}")
+
+
+# ---------------------------------------------------------------------------
+# Web「设置」页读写接口
+# ---------------------------------------------------------------------------
+@app.get("/api/settings")
+def api_get_settings():
+    """读取已保存的推送/预警设置（密钥做脱敏）。"""
+    stored = _load_web_settings()
+    out: Dict[str, str] = {}
+    for field in list(_WEB_SETTINGS_KEYS) + ["alert_up_pct", "alert_down_pct"]:
+        value = stored.get(field, "")
+        if field in _SECRET_FIELDS and value:
+            value = ("*" * max(0, len(value) - 4)) + value[-4:]
+        out[field] = value
+    out["config_file"] = str(WEB_SETTINGS_PATH)
+    return out
+
+
+@app.post("/api/settings")
+def api_save_settings(payload: Dict[str, str]):
+    """保存推送渠道与预警阈值。"""
+    try:
+        values = {k: v for k, v in (payload or {}).items() if v is not None}
+        # 脱敏后的密钥若被原样回传，不要覆盖真实值
+        for field in _SECRET_FIELDS:
+            if str(values.get(field, "")).startswith("*"):
+                values.pop(field, None)
+        _save_web_settings(values)
+        return {"ok": True, "saved": len(values), "config_file": str(WEB_SETTINGS_PATH)}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # 3.0：MCP 端点（Model Context Protocol，JSON-RPC 2.0）

@@ -21,16 +21,39 @@ LAYER_COLORS = {
 LAYER_LABEL = {"upstream": "上游", "midstream": "中游", "downstream": "下游"}
 
 
-def _setup_font(plt):
+_CJK_FONT_CANDIDATES = [
+    "PingFang SC", "Microsoft YaHei", "SimHei", "WenQuanYi Zen Hei",
+    "Arial Unicode MS", "Noto Sans CJK SC", "Noto Sans CJK JP",
+    "Source Han Sans SC", "Heiti SC", "STHeiti",
+]
+
+
+def _setup_font(plt) -> bool:
+    """挑选一个实际存在的中文字体。
+
+    旧实现只是把候选名赋给 rcParams——赋值本身不会抛异常，
+    所以 `try/except` 永远不会触发，离线/异构系统上会静默退回默认字体、
+    中文变成方块。这里改为先用 font_manager 检查字体是否真的可用。
+    """
     import matplotlib
-    for name in ["PingFang SC", "Microsoft YaHei", "SimHei",
-                 "WenQuanYi Zen Hei", "Arial Unicode MS", "Noto Sans CJK SC"]:
-        try:
-            matplotlib.rcParams["font.sans-serif"] = [name]
+    try:
+        from matplotlib import font_manager
+        available = {f.name for f in font_manager.fontManager.ttflist}
+    except Exception:  # noqa: BLE001
+        available = set()
+
+    for name in _CJK_FONT_CANDIDATES:
+        if name in available:
+            matplotlib.rcParams["font.sans-serif"] = [name, "DejaVu Sans"]
             matplotlib.rcParams["axes.unicode_minus"] = False
-            return
-        except Exception:
-            continue
+            return True
+
+    logger.warning(
+        "未找到可用中文字体（候选：%s），静态产业链图的中文可能显示为方块",
+        "、".join(_CJK_FONT_CANDIDATES),
+    )
+    matplotlib.rcParams["axes.unicode_minus"] = False
+    return False
 
 
 def chain_graph_html(chain_info: Optional[dict], highlight_code: str = "") -> str:
@@ -67,12 +90,15 @@ def chain_graph_html(chain_info: Optional[dict], highlight_code: str = "") -> st
                 "size": 30 if comp.get("code") == highlight_code else 20,
             })
 
-    # 相邻层连边
+    # 相邻层连边（用 name -> node 映射，避免 O(n²) 的 next() 查找 + 找不到时抛 StopIteration）
+    node_by_name = {n["name"]: n for n in nodes}
     for a, b in zip(layer_order, layer_order[1:]):
         for c1 in chain_info.get(a, []):
             for c2 in chain_info.get(b, []):
-                n1 = next(n for n in nodes if n["name"] == c1["name"])
-                n2 = next(n for n in nodes if n["name"] == c2["name"])
+                n1 = node_by_name.get(c1.get("name"))
+                n2 = node_by_name.get(c2.get("name"))
+                if n1 is None or n2 is None:
+                    continue
                 edges_x += [n1["x"], n2["x"], None]
                 edges_y += [n1["y"], n2["y"], None]
 
