@@ -108,31 +108,28 @@ border-radius:6px;font-size:13px;cursor:pointer;}
   }
 }
 </style></head><body>
-<h1>研报辅助 Agent <span class="version">v3.0</span></h1>
-<div class="subtitle">大模型 + AKShare · 数字交叉校验反幻觉 · 多空辩论 · 决策仪表盘</div>
+<h1>研报辅助 Agent <span class="version">v3.9</span></h1>
+<div class="subtitle">最靠谱的反幻觉 A 股投研助手</div>
 
 <div class="tabs">
-  <div class="tab active" onclick="switchTab('brief')">📊 公司速览</div>
+  <div class="tab active" onclick="switchTab('brief')">🏠 首页</div>
   <div class="tab" onclick="switchTab('report')">📝 深度研报</div>
-  <div class="tab" onclick="switchTab('watchlist')">⭐ 我的自选股</div>
+  <div class="tab" onclick="switchTab('watchlist')">⭐ 自选股</div>
 </div>
 
-<!-- 公司速览 Tab -->
+<!-- 公司速览 Tab（首页） -->
 <div id="tab-brief" class="tab-content active">
   <div class="card">
-    <h3>公司投研速览</h3>
-    <div class="row">
-      <input id="symbol" placeholder="A 股代码，如 600519" value="600519">
-      <button onclick="startBrief()">生成速览</button>
-      <button class="secondary" onclick="addToWatchlist()">+ 加入自选</button>
-      <button class="secondary" id="autoRefreshBtn" onclick="toggleAutoRefresh()">▶ 自动刷新</button>
+    <h3 style="text-align:center;font-size:20px;margin-bottom:16px;">输入股票代码，一键生成投研速览</h3>
+    <div class="row" style="max-width:600px;margin:0 auto;">
+      <input id="symbol" placeholder="如 600519（贵州茅台）" value="600519" style="font-size:16px;padding:14px;">
+      <button onclick="startBrief()" style="font-size:16px;padding:14px 24px;">生成速览</button>
     </div>
-    <div id="autoRefreshStatus" style="font-size:12px;color:#6b7280;margin-top:4px;"></div>
 
-    <!-- 数据源选择（并列，可多选） -->
-    <div style="margin:16px 0;padding:12px;background:#f8f9fa;border-radius:8px;">
+    <!-- 数据源选择（全部展示，用户随便选） -->
+    <div style="margin:20px 0;padding:12px;background:#f8f9fa;border-radius:8px;">
       <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:#374151;">
-        📊 数据源选择（并列，可多选，自动交叉验证）
+        📊 数据源选择（可多选，自动交叉验证）
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;">
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
@@ -171,7 +168,14 @@ border-radius:6px;font-size:13px;cursor:pointer;}
       </div>
     </div>
 
-    <div class="tip">行情 + 财务 + 资讯 + 技术面 + 数字交叉校验（反幻觉）</div>
+    <!-- 小功能按钮 -->
+    <div style="display:flex;gap:8px;margin-bottom:12px;">
+      <button class="secondary" id="autoRefreshBtn" onclick="toggleAutoRefresh()" style="font-size:13px;padding:6px 12px;">▶ 自动刷新（每10秒）</button>
+      <button class="secondary" onclick="addToWatchlist()" style="font-size:13px;padding:6px 12px;">+ 加入自选股</button>
+    </div>
+    <div id="autoRefreshStatus" style="font-size:12px;color:#6b7280;margin-top:4px;"></div>
+
+    <div class="tip" style="text-align:center;">行情 + 财务 + 技术面 + 反幻觉校验 + 多空辩论 + 决策仪表盘</div>
     <div id="brief_result" class="result" style="display:none;"></div>
   </div>
 </div>
@@ -179,13 +183,13 @@ border-radius:6px;font-size:13px;cursor:pointer;}
 <!-- 深度研报 Tab -->
 <div id="tab-report" class="tab-content">
   <div class="card">
-    <h3>深度研报生成（多智能体流水线）</h3>
-    <div class="row">
-      <input id="topic" placeholder="研究主题，如 低空经济产业链分析">
-      <button onclick="startReport()">生成研报</button>
+    <h3 style="text-align:center;font-size:20px;margin-bottom:16px;">输入研究主题，生成完整深度研报</h3>
+    <div class="row" style="max-width:600px;margin:0 auto;">
+      <input id="topic" placeholder="如 低空经济产业链分析" style="font-size:16px;padding:14px;">
+      <button onclick="startReport()" style="font-size:16px;padding:14px 24px;">生成研报</button>
     </div>
-    <div class="row">
-      <label class="tip" style="margin:0;"><input type="checkbox" id="deep"> 递归深挖检索（更慢但更全）</label>
+    <div class="row" style="max-width:600px;margin:12px auto 0;">
+      <label class="tip" style="margin:0;font-size:13px;"><input type="checkbox" id="deep"> 递归深挖检索（更慢但更全）</label>
     </div>
     <div class="tip">流程：规划 → 检索 → 逐章分析 → 多空辩论 → 撰写 → 审校（并行生成）</div>
     <div id="report_progress" style="margin-top:16px;font-size:13px;color:#6b7280;"></div>
