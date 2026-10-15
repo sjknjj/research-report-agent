@@ -190,6 +190,30 @@ border-radius:6px;font-size:13px;cursor:pointer;}
       </div>
     </div>
 
+    <!-- 搜索引擎选择 -->
+    <div style="margin:20px 0;padding:12px;background:#f8f9fa;border-radius:8px;">
+      <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:#374151;">
+        🔍 搜索引擎选择（国内推荐用百度/必应，不用配 key）
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="search_engine" value="baidu" checked> 百度（推荐，国内不用key）
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="search_engine" value="bing" checked> 必应（国内不用key）
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="search_engine" value="duckduckgo"> DuckDuckGo（国内被墙）
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="search_engine" value="tavily"> Tavily（配key推荐）
+        </label>
+      </div>
+      <div style="font-size:12px;color:#6b7280;margin-top:8px;">
+        💡 生成研报/速览时会自动用这些搜索引擎搜资料
+      </div>
+    </div>
+
     <div class="tip" style="text-align:center;">行情 + 财务 + 技术面 + 反幻觉校验 + 多空辩论 + 决策仪表盘</div>
 
     <!-- 报告操作按钮（结果出来后显示） -->
