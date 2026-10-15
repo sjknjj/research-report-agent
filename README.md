@@ -23,6 +23,20 @@
 
 ---
 
+## 🚀 一键启动（最简单）
+
+**第一次用：**
+1. 装好 Docker 或 Python 3.10+
+2. `git clone https://github.com/sjknjj/research-report-agent.git`
+3. `cd research-report-agent/research-report-agent`
+4. `cp .env.example .env` → 填上你的 DeepSeek API key
+5. **双击「启动.command」**（Mac）或跑 `python main.py serve`
+
+**以后用：**
+- 双击「启动.command」就行，自动启动 + 自动打开浏览器
+
+---
+
 ## 🖥️ Web 界面（开箱即用，不用敲命令）
 
 启动后打开浏览器访问 `http://localhost:8000`，**所有功能都在网页上操作**，不用敲任何命令：

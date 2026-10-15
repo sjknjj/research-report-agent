@@ -4,6 +4,21 @@
 
 ---
 
+## ⚡ 最快上手（30秒）
+
+**第一次用（只需要做一次）：**
+1. `git clone https://github.com/sjknjj/research-report-agent.git`
+2. `cd research-report-agent/research-report-agent`
+3. `cp .env.example .env` → 填上你的 DeepSeek API key
+4. **双击「启动.command」**
+
+**以后用（每次只需要）：**
+- **双击「启动.command」** → 自动启动 + 自动打开浏览器
+
+就这么简单，不用记任何命令。
+
+---
+
 ## 📋 目录
 
 1. [准备工作](#一准备工作)
