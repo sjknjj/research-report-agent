@@ -81,6 +81,7 @@ python main.py stats          # 查看幻觉率历史统计和模型排名
 | --- | --- | --- |
 | `python main.py history` | 查看所有历史生成的报告 | `python main.py history --keyword 600519` |
 | `python main.py monitor` | 盘中实时监控自选股涨跌，达阈值自动推送 | `python main.py monitor --threshold 5 --interval 60` |
+| `python main.py stats` | 查看幻觉率历史统计和模型可信度排名 | `python main.py stats` |
 
 ### 💬 易用性提升
 | 优化项 | 说明 |
