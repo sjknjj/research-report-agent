@@ -349,3 +349,65 @@ python main.py stats
 | B | 5-15% | 中可信，关键数据再核对一下 |
 | C | 15-30% | 低可信，建议人工复核 |
 | D | > 30% | 不可信，重跑吧 |
+
+---
+
+## 十二、多数据源配置（v3.7新增）
+
+本项目支持 **12 个内置数据源**，免费的直接用，付费的配好 token 就能用。
+
+### Web 界面选数据源（最方便）
+
+1. 启动 Web：`python main.py serve`
+2. 打开 http://localhost:8000
+3. 在「公司速览」页输入股票代码
+4. 下面的「数据源选择」面板，勾选想用哪些
+5. 点「生成速览」
+
+### 配置文件选数据源（批量/定时任务用）
+
+在 `config.yaml` 里配置：
+
+```yaml
+data_source:
+  sources:
+    - akshare        # 免费，默认启用
+    - eastmoney_http # 免费，东财HTTP
+    - sina_http      # 免费，新浪财经
+    - tencent_http   # 免费，腾讯财经
+    # - tushare      # 付费，配好TUSHARE_TOKEN就能用
+    # - wind         # 付费，需要Wind终端
+    # - choice       # 付费，需要Choice终端
+    # - ifind        # 付费，需要iFinD终端
+    # - jqdata       # 付费，需要聚宽账号
+    # - ricequant    # 付费，需要米筐账号
+  auto_failover: true           # 主挂了自动切下一个
+  cross_check_enabled: true     # 多源交叉验证
+```
+
+### 付费数据源怎么配
+
+在 `.env` 里加对应的 token / 账号：
+
+```bash
+# Tushare（注册就送积分，够用）
+TUSHARE_TOKEN=你的tushare token
+
+# 聚宽 JQData
+JQDATA_USERNAME=你的聚宽账号
+JQDATA_PASSWORD=你的聚宽密码
+
+# 米筐 RiceQuant
+RQDATA_USERNAME=你的米筐账号
+RQDATA_PASSWORD=你的米筐密码
+
+# Wind / Choice / iFinD
+# 不用配，装了对应终端就能用
+```
+
+### 多源交叉验证效果
+
+选多个数据源后，系统会自动比对同一个数字：
+> ⚠️ 数据不一致：市盈率（数据源1=25.3，数据源2=26.1）最大最小误差 3.1%
+
+**这就是反幻觉的终极形态**：不只校验模型生成的数字，连数据源本身的数字都校验。
