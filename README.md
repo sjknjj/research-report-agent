@@ -1,4 +1,4 @@
-# 研报辅助 Agent · Research Report Agent
+# 投研辅助 Agent · Research Report Agent
 
 **最靠谱的反幻觉 A 股投研 Agent**  
 基于大模型 + 多数据源，自动生成投研报告，系统性规避 AI「数字幻觉」。
