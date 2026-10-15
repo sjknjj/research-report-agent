@@ -90,6 +90,37 @@ border-radius:6px;font-size:13px;cursor:pointer;}
       <button onclick="startBrief()">生成速览</button>
       <button class="secondary" onclick="addToWatchlist()">+ 加入自选</button>
     </div>
+
+    <!-- 数据源选择（并列，可多选） -->
+    <div style="margin:16px 0;padding:12px;background:#f8f9fa;border-radius:8px;">
+      <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:#374151;">
+        📊 数据源选择（并列，可多选，自动交叉验证）
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="datasource" value="akshare" checked> AKShare（推荐）
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="datasource" value="eastmoney_http"> 东方财富
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="datasource" value="sina_http"> 新浪财经
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="datasource" value="tencent_http"> 腾讯财经
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;opacity:0.5;">
+          <input type="checkbox" name="datasource" value="tushare" disabled> Tushare（付费）
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;opacity:0.5;">
+          <input type="checkbox" name="datasource" value="wind" disabled> Wind（付费）
+        </label>
+      </div>
+      <div style="font-size:12px;color:#6b7280;margin-top:8px;">
+        💡 选多个数据源会自动交叉验证，同一个数字不一致就标记"数据存疑"
+      </div>
+    </div>
+
     <div class="tip">行情 + 财务 + 资讯 + 技术面 + 数字交叉校验（反幻觉）</div>
     <div id="brief_result" class="result" style="display:none;"></div>
   </div>
