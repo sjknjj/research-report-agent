@@ -36,6 +36,41 @@
 
 ---
 
+## 🔗 同类开源项目参考（可吸收方向）
+
+本项目在调研同类开源产品后，吸收了以下项目的设计思路，未来可进一步借鉴：
+
+| 项目 | Star量级 | 可吸收的点 | 链接 |
+| --- | --- | --- | --- |
+| **TradingAgents-CN** | ~28K | 多空辩论机制（bull vs bear analyst 对抗后再决策）、三方风险审议流程 | [GitHub](https://github.com/hy172189325/TradingAgents-CN) |
+| **daily_stock_analysis** | ~56K | 每日定时跑批 + 结果推送到企业微信/飞书/Telegram 的通知能力 | [GitHub](https://github.com/ZhuLinsen/daily_stock_analysis) |
+| **FinRobot (AI4Finance)** | 学术框架 | 估值模型自动计算（DCF/可比公司）、财报情绪分析模块 | [GitHub](https://github.com/AI4FinanceFoundation/FinRobot) |
+| **观澜 Financial Analyst** | PyPI | 24个专职agent分工（基本面/技术面/资金面/量化评分），比当前5agent粒度更细 | [PyPI](https://pypi.org/project/financial-analyst/) |
+| **awesome-trading-agents** | 资源列表 | 持续追踪金融agent生态，含MCP servers、skills清单 | [GitHub](https://github.com/LLMQuant/awesome-trading-agents) |
+
+> **当前项目差异化定位**：轻量化（纯Python无重型依赖）、反幻觉双层校验（数值+语义）、离线可跑。上述项目多为全栈重型方案（MongoDB/Redis/Docker/Vue），本项目刻意保持单文件可运行。
+
+---
+
+## 🔌 MCP（Model Context Protocol）支持情况
+
+**当前版本：暂不支持 MCP 接口。**
+
+| 维度 | 状态 | 说明 |
+| --- | --- | --- |
+| MCP Server 暴露工具 | ❌ | 项目当前是独立应用，未将 AKShare 数据接口、检索工具、校验器封装为 MCP Server |
+| MCP Client 调用外部工具 | ❌ | researcher 的 search_tool 是内置实现（DuckDuckGo/Tavily），未走 MCP 协议对接外部工具 |
+| 与 Claude Desktop / Cursor 集成 | ❌ | 无法作为 MCP 工具被 Claude / Cursor 直接调用 |
+
+**未来规划**：
+- v3.1 计划将 `src/data/sources.py` 的 AKShare 接口封装为 MCP Server，暴露 `get_stock_price` / `get_financials` / `get_news` 等工具
+- v3.2 计划将 `CrossVerifier` 也作为 MCP 工具，供外部 agent 调用做数字反幻觉校验
+- 到时候可直接在 Claude Desktop / Cursor 的 `mcp.json` 里接入本项目，把"A股数据+校验"作为工具使用
+
+> MCP 是 Anthropic 推出的开放协议（类似AI界的USB-C），用于标准化LLM与外部工具/数据源的连接。本项目核心能力（A股数据+反幻觉校验）非常适合封装为MCP Server对外复用。
+
+---
+
 ## 它能做什么
 
 | 需求 | 实现 |
