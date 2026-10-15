@@ -184,14 +184,16 @@ border-radius:6px;font-size:13px;cursor:pointer;}
       </div>
     </div>
 
-    <!-- 小功能按钮 -->
-    <div style="display:flex;gap:8px;margin-bottom:12px;">
-      <button class="secondary" id="autoRefreshBtn" onclick="toggleAutoRefresh()" style="font-size:13px;padding:6px 12px;">▶ 自动刷新（每10秒）</button>
-      <button class="secondary" onclick="addToWatchlist()" style="font-size:13px;padding:6px 12px;">+ 加入自选股</button>
+    <div class="tip" style="text-align:center;">行情 + 财务 + 技术面 + 反幻觉校验 + 多空辩论 + 决策仪表盘</div>
+
+    <!-- 报告操作按钮（结果出来后显示） -->
+    <div id="brief_actions" style="display:none;gap:8px;margin:12px 0;padding:12px;background:#f8f9fa;border-radius:8px;">
+      <button class="secondary" onclick="downloadPdf()" style="font-size:13px;padding:6px 12px;">📄 导出 PDF</button>
+      <button class="secondary" onclick="addToWatchlist()" style="font-size:13px;padding:6px 12px;">⭐ 加入自选</button>
+      <button class="secondary" id="autoRefreshBtn" onclick="toggleAutoRefresh()" style="font-size:13px;padding:6px 12px;">🔄 自动刷新</button>
     </div>
     <div id="autoRefreshStatus" style="font-size:12px;color:#6b7280;margin-top:4px;"></div>
 
-    <div class="tip" style="text-align:center;">行情 + 财务 + 技术面 + 反幻觉校验 + 多空辩论 + 决策仪表盘</div>
     <div id="brief_result" class="result" style="display:none;"></div>
   </div>
 </div>
@@ -287,7 +289,17 @@ async function startBrief(){
       const v=d.verification;
       el.innerHTML += `<hr><p style="color:#6b7280;font-size:13px;">交叉校验：${v.passed?'✅ 通过':'⚠️ 未通过'}｜一致${v.supported}、矛盾${v.mismatch}、幻觉率${(v.hallucination_rate*100).toFixed(1)}%</p>`;
     }
+    // 显示操作按钮
+    document.getElementById('brief_actions').style.display = 'flex';
   }catch(e){el.textContent='请求失败：'+e;}
+}
+
+// 下载 PDF
+function downloadPdf(){
+  const sym = document.getElementById('symbol').value.trim();
+  const sources = Array.from(document.querySelectorAll('input[name="datasource"]:checked'))
+    .map(cb=>cb.value).join(',');
+  window.open('/api/brief/pdf?symbol='+encodeURIComponent(sym)+'&sources='+encodeURIComponent(sources), '_blank');
 }
 
 // 自动刷新
@@ -391,6 +403,36 @@ def api_brief(symbol: str, sources: str = "akshare"):
         text=result.text,
         verification=result.verification or {},
         output_file=str(files[0]) if files else "",
+    )
+
+
+@app.get("/api/brief/pdf")
+def api_brief_pdf(symbol: str, sources: str = "akshare"):
+    """直接返回 PDF 文件，前端可以直接下载。"""
+    import os
+    from fastapi.responses import FileResponse
+
+    settings = get_settings()
+    source_list = [s.strip() for s in sources.split(",") if s.strip()]
+    ra = ResearchAssistant(settings, sources=source_list)
+    try:
+        result = ra.company_brief(symbol, prefer_live=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    source_info = f"\n\n---\n\n📊 **本次使用的数据源**：{', '.join(source_list)}\n"
+    result.text = result.text + source_info
+
+    # 导出 PDF
+    from src.export.pdf_export import export_pdf
+    pdf_path = export_pdf(result.text, f"{symbol}_brief.pdf", title=f"{symbol} 投研速览")
+    if not pdf_path or not os.path.exists(pdf_path):
+        raise HTTPException(status_code=500, detail="PDF 导出失败")
+
+    return FileResponse(
+        path=pdf_path,
+        filename=f"{symbol}_brief.pdf",
+        media_type="application/pdf",
     )
 
 
