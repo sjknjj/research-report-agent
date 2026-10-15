@@ -138,6 +138,8 @@ border-radius:6px;font-size:13px;cursor:pointer;}
   <div class="tab" onclick="switchTab('factor')">⭐ 因子</div>
   <div class="tab" onclick="switchTab('stats')">📊 统计</div>
   <div class="tab" onclick="switchTab('watchlist')">⭐ 自选股</div>
+  <div class="tab" onclick="switchTab('daily')">📅 每日跑批</div>
+  <div class="tab" onclick="switchTab('apikey')">🔑 API配置</div>
   <div class="tab" onclick="switchTab('settings')">⚙️ 设置</div>
 </div>
 
@@ -347,6 +349,101 @@ border-radius:6px;font-size:13px;cursor:pointer;}
     <div id="watchlist" class="watchlist"></div>
     <div id="watchlist_empty" class="tip" style="margin-top:20px;">
       还没有自选股，在「公司速览」页输入代码后点「+ 加入自选」
+    </div>
+  </div>
+</div>
+
+<!-- 每日跑批教程 Tab -->
+<div id="tab-daily" class="tab-content">
+  <div class="card">
+    <h3 style="text-align:center;font-size:20px;margin-bottom:20px;">📅 每日自动跑批配置教程</h3>
+    <div style="max-width:700px;margin:0 auto;line-height:1.8;font-size:14px;">
+      <p style="color:#6b7280;margin-bottom:20px;">配好之后，<strong>每个工作日早上 9 点自动生成自选股报告并推送到飞书/企微</strong>，不用你每天手动点。</p>
+
+      <h4 style="color:#374151;margin:20px 0 10px;">第一步：把代码推到你的 GitHub 仓库</h4>
+      <p>如果你还没有自己的仓库，先 Fork 一份：<br>
+      👉 打开 <a href="https://github.com/sjknjj/research-report-agent" target="_blank">https://github.com/sjknjj/research-report-agent</a><br>
+      👉 点右上角「Fork」按钮，复制到你自己的账号下</p>
+
+      <h4 style="color:#374151;margin:20px 0 10px;">第二步：在 GitHub 仓库里配密钥（Secrets）</h4>
+      <p>1. 打开你 Fork 的仓库 → 点「Settings」<br>
+      2. 左边菜单点「Secrets and variables」→「Actions」<br>
+      3. 点绿色的「New repository secret」按钮<br>
+      4. 逐个添加以下密钥（名称要完全一样）：</p>
+      <div style="background:#f8f9fa;padding:16px;border-radius:8px;margin:12px 0;font-family:monospace;font-size:13px;">
+        <p><strong>LLM_BASE_URL</strong> = https://api.deepseek.com/v1</p>
+        <p><strong>LLM_API_KEY</strong> = sk-你的大模型key</p>
+        <p><strong>LLM_MODEL</strong> = deepseek-chat</p>
+        <p><strong>FEISHU_WEBHOOK_URL</strong> = https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx</p>
+      </div>
+      <p style="font-size:13px;color:#6b7280;">💡 用企业微信的话，加 <strong>WECOM_WEBHOOK_KEY</strong> 而不是飞书的。</p>
+
+      <h4 style="color:#374151;margin:20px 0 10px;">第三步：编辑自选股列表</h4>
+      <p>在仓库根目录找到 <code>watchlist.txt</code>，一行一个股票代码：</p>
+      <div style="background:#f8f9fa;padding:16px;border-radius:8px;margin:12px 0;font-family:monospace;font-size:13px;">
+        <p>600519</p>
+        <p>000858</p>
+        <p>300750</p>
+      </div>
+
+      <h4 style="color:#374151;margin:20px 0 10px;">第四步：手动测试一次</h4>
+      <p>1. 仓库页点「Actions」标签<br>
+      2. 左边选「Daily Report」<br>
+      3. 右边点「Run workflow」按钮<br>
+      4. 等 1-2 分钟，看飞书群里有没有收到报告</p>
+
+      <div style="background:#ecfdf5;border:1px solid #a7f3d0;padding:16px;border-radius:8px;margin-top:20px;">
+        <p style="color:#059669;font-weight:600;">✅ 配好之后就不用管了，每天早上自动收到报告。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- API 配置教程 Tab -->
+<div id="tab-apikey" class="tab-content">
+  <div class="card">
+    <h3 style="text-align:center;font-size:20px;margin-bottom:20px;">🔑 大模型 API Key 配置教程</h3>
+    <div style="max-width:700px;margin:0 auto;line-height:1.8;font-size:14px;">
+      <p style="color:#6b7280;margin-bottom:20px;">这个项目需要一个大模型 API 来生成研报。推荐用 DeepSeek（便宜好用），或者 OpenAI / 通义千问 / 智谱都行。</p>
+
+      <h4 style="color:#374151;margin:20px 0 10px;">第一步：申请 API Key</h4>
+      <p><strong>推荐 DeepSeek（便宜，1块钱能用好久）：</strong><br>
+      👉 打开 <a href="https://platform.deepseek.com/" target="_blank">https://platform.deepseek.com/</a><br>
+      👉 注册账号 → 充 10 块钱 → 创建 API Key → 复制下来</p>
+
+      <p><strong>其他选项：</strong></p>
+      <ul>
+        <li>OpenAI：https://platform.openai.com/</li>
+        <li>通义千问（阿里云）：https://dashscope.aliyun.com/</li>
+        <li>智谱AI：https://open.bigmodel.cn/</li>
+      </ul>
+
+      <h4 style="color:#374151;margin:20px 0 10px;">第二步：填到 .env 文件里</h4>
+      <p>在项目根目录找到 <code>.env.example</code> 文件，复制一份改名叫 <code>.env</code>，然后填上你的 key：</p>
+      <div style="background:#f8f9fa;padding:16px;border-radius:8px;margin:12px 0;font-family:monospace;font-size:13px;">
+        <p># 大模型配置（推荐 DeepSeek）</p>
+        <p>LLM_BASE_URL=https://api.deepseek.com/v1</p>
+        <p>LLM_API_KEY=sk-你的key填在这里</p>
+        <p>LLM_MODEL=deepseek-chat</p>
+      </div>
+
+      <h4 style="color:#374151;margin:20px 0 10px;">第三步：保存并重启</h4>
+      <p>保存 <code>.env</code> 文件，然后重启 Web 服务：</p>
+      <div style="background:#f8f9fa;padding:16px;border-radius:8px;margin:12px 0;font-family:monospace;font-size:13px;">
+        <p># 如果用 Docker：</p>
+        <p>docker-compose restart</p>
+        <p>&nbsp;</p>
+        <p># 如果用本地 Python：</p>
+        <p># 按 Ctrl+C 停掉，然后重新跑：</p>
+        <p>python main.py serve</p>
+      </div>
+
+      <h4 style="color:#374151;margin:20px 0 10px;">第四步：测试一下</h4>
+      <p>打开浏览器 <code>http://localhost:8000</code>，在首页输入股票代码（比如 600519），点「生成速览」，能出结果就说明配好了。</p>
+
+      <div style="background:#ecfdf5;border:1px solid #a7f3d0;padding:16px;border-radius:8px;margin-top:20px;">
+        <p style="color:#059669;font-weight:600;">💡 不用大模型 API 也能跑：不配 key 就用离线样例模式，能走通流程但不能生成真研报。</p>
+      </div>
     </div>
   </div>
 </div>
