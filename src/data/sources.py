@@ -267,11 +267,156 @@ class OfflineSource(DataSourceBase):
         raise DataSourceError("OfflineSource 只提供静态样例，不支持动态取数")
 
 
+# ============================================================
+# v3.7新增：更多主流数据源（免费HTTP API + 付费商业数据源）
+# ============================================================
+
+class EastMoneyHttpSource(DataSourceBase):
+    """东方财富 HTTP API（免费，不用装库，直接调HTTP接口）。
+
+    适合：不想装 akshare，想直接用东财 HTTP 接口的场景
+    """
+
+    name = "eastmoney_http"
+
+    def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
+        raise DataSourceError("EastMoneyHttpSource 目前是占位实现，建议用 AKShare")
+
+    def financial_abstract(self, symbol: str):
+        raise DataSourceError("EastMoneyHttpSource 目前是占位实现，建议用 AKShare")
+
+    def stock_info(self, symbol: str):
+        raise DataSourceError("EastMoneyHttpSource 目前是占位实现，建议用 AKShare")
+
+
+class SinaHttpSource(DataSourceBase):
+    """新浪财经 HTTP API（免费）。"""
+
+    name = "sina_http"
+
+    def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
+        raise DataSourceError("SinaHttpSource 目前是占位实现，建议用 AKShare")
+
+    def financial_abstract(self, symbol: str):
+        raise DataSourceError("SinaHttpSource 目前是占位实现，建议用 AKShare")
+
+    def stock_info(self, symbol: str):
+        raise DataSourceError("SinaHttpSource 目前是占位实现，建议用 AKShare")
+
+
+class TencentHttpSource(DataSourceBase):
+    """腾讯财经 HTTP API（免费）。"""
+
+    name = "tencent_http"
+
+    def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
+        raise DataSourceError("TencentHttpSource 目前是占位实现，建议用 AKShare")
+
+    def financial_abstract(self, symbol: str):
+        raise DataSourceError("TencentHttpSource 目前是占位实现，建议用 AKShare")
+
+    def stock_info(self, symbol: str):
+        raise DataSourceError("TencentHttpSource 目前是占位实现，建议用 AKShare")
+
+
+# ============================================================
+# 付费商业数据源（占位，用户有授权就能用）
+# ============================================================
+
+class WindSource(DataSourceBase):
+    """Wind 万得（付费，商业授权）。
+
+    需要 Wind 终端 + WindPy 库
+    """
+
+    name = "wind"
+
+    def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
+        raise DataSourceError("WindSource 目前是占位实现，需要Wind授权")
+
+    def financial_abstract(self, symbol: str):
+        raise DataSourceError("WindSource 目前是占位实现，需要Wind授权")
+
+    def stock_info(self, symbol: str):
+        raise DataSourceError("WindSource 目前是占位实现，需要Wind授权")
+
+
+class ChoiceSource(DataSourceBase):
+    """东方财富 Choice（付费，商业授权）。"""
+
+    name = "choice"
+
+    def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
+        raise DataSourceError("ChoiceSource 目前是占位实现，需要Choice授权")
+
+    def financial_abstract(self, symbol: str):
+        raise DataSourceError("ChoiceSource 目前是占位实现，需要Choice授权")
+
+    def stock_info(self, symbol: str):
+        raise DataSourceError("ChoiceSource 目前是占位实现，需要Choice授权")
+
+
+class iFinDSource(DataSourceBase):
+    """同花顺 iFinD（付费，商业授权）。"""
+
+    name = "ifind"
+
+    def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
+        raise DataSourceError("iFinDSource 目前是占位实现，需要iFinD授权")
+
+    def financial_abstract(self, symbol: str):
+        raise DataSourceError("iFinDSource 目前是占位实现，需要iFinD授权")
+
+    def stock_info(self, symbol: str):
+        raise DataSourceError("iFinDSource 目前是占位实现，需要iFinD授权")
+
+
+class JQDataSource(DataSourceBase):
+    """聚宽 JQData（付费，量化数据源）。"""
+
+    name = "jqdata"
+
+    def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
+        raise DataSourceError("JQDataSource 目前是占位实现，需要JQData授权")
+
+    def financial_abstract(self, symbol: str):
+        raise DataSourceError("JQDataSource 目前是占位实现，需要JQData授权")
+
+    def stock_info(self, symbol: str):
+        raise DataSourceError("JQDataSource 目前是占位实现，需要JQData授权")
+
+
+class RiceQuantSource(DataSourceBase):
+    """米筐 RiceQuant（付费，量化数据源）。"""
+
+    name = "ricequant"
+
+    def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
+        raise DataSourceError("RiceQuantSource 目前是占位实现，需要RiceQuant授权")
+
+    def financial_abstract(self, symbol: str):
+        raise DataSourceError("RiceQuantSource 目前是占位实现，需要RiceQuant授权")
+
+    def stock_info(self, symbol: str):
+        raise DataSourceError("RiceQuantSource 目前是占位实现，需要RiceQuant授权")
+
+
 def build_data_source(source_name: str, **kwargs) -> DataSourceBase:
     """根据名称构建数据源（插件式工厂函数）。"""
     sources = {
+        # 免费
         "akshare": AKShareSource,
+        "eastmoney_http": EastMoneyHttpSource,
+        "sina_http": SinaHttpSource,
+        "tencent_http": TencentHttpSource,
+        # 付费
         "tushare": TushareSource,
+        "wind": WindSource,
+        "choice": ChoiceSource,
+        "ifind": iFinDSource,
+        "jqdata": JQDataSource,
+        "ricequant": RiceQuantSource,
+        # 其他
         "mcp": MCPSource,
         "offline": OfflineSource,
     }

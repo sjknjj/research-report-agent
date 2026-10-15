@@ -8,29 +8,45 @@
 
 ---
 
-## 📊 v3.7 多数据源架构（插件式，不设上限，交叉验证）
+## 📊 v3.7 多数据源架构（13个内置数据源，插件式，交叉验证）
 
-### ✨ 本次新增
-| 功能 | 说明 |
-| --- | --- |
-| **插件式数据源架构** | 继承基类就能加新数据源，不设上限 |
-| **内置多个数据源适配器** | AKShare（免费）/ Tushare（需Token）/ MCP（占位）/ 离线样例 |
-| **同时用多个数据源** | 配置里写几个就用几个，自动并行取数 |
-| **自动容灾切换** | 主数据源挂了自动切下一个，不瘫痪 |
-| **多源交叉验证** | 两个数据源同一个数字不一致，自动标记"⚠️ 数据存疑" |
+### ✨ 内置的 13 个数据源
 
-### 🚀 怎么配多数据源
+| 类型 | 数据源 | 说明 |
+|---|---|---|
+| **免费** | AKShare | 默认启用，东财+同花顺多接口，最全 |
+| **免费** | 东方财富 HTTP | 直接调东财HTTP接口，不用装库 |
+| **免费** | 新浪财经 HTTP | 新浪财经接口 |
+| **免费** | 腾讯财经 HTTP | 腾讯财经接口 |
+| **付费** | Tushare | 积分制，需申请Token |
+| **付费** | Wind 万得 | 商业授权，专业机构用 |
+| **付费** | Choice 东方财富 | 商业授权 |
+| **付费** | 同花顺 iFinD | 商业授权 |
+| **付费** | 聚宽 JQData | 量化数据源 |
+| **付费** | 米筐 RiceQuant | 量化数据源 |
+| **其他** | MCP | 通过MCP协议接外部数据源 |
+| **其他** | 离线样例 | 容灾用，主数据源挂了自动切 |
+
+### 🚀 怎么配多数据源（不设上限）
 
 ```yaml
 # config.yaml 里的 data_source 段
 data_source:
   sources:
-    - akshare       # 免费，默认启用
-    - tushare       # 取消注释并配好TUSHARE_TOKEN就能用
-    # - mcp         # 未来接外部MCP Server
-    # - offline     # 离线样例，容灾用
-  auto_failover: true          # 主挂了自动切下一个
-  cross_check_enabled: true    # 多源交叉验证
+    - akshare        # 免费，默认启用
+    - eastmoney_http # 免费，东财HTTP
+    # - sina_http     # 免费，新浪财经
+    # - tencent_http  # 免费，腾讯财经
+    # - tushare       # 付费，配好TUSHARE_TOKEN就能用
+    # - wind          # 付费，需要Wind授权
+    # - choice        # 付费，需要Choice授权
+    # - ifind         # 付费，需要iFinD授权
+    # - jqdata        # 付费，量化数据源
+    # - ricequant     # 付费，量化数据源
+    # - mcp           # 接外部MCP Server
+    # - offline       # 离线样例，容灾用
+  auto_failover: true           # 主挂了自动切下一个
+  cross_check_enabled: true      # 多源交叉验证
 ```
 
 ### 交叉验证效果
