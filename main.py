@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -129,7 +130,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_mon = sub.add_parser("monitor", parents=[common], help="盘中实时监控自选股涨跌，达阈值推送")
     p_mon.add_argument("--file", default="watchlist.txt", help="自选股列表文件")
-    p_mon.add_argument("--threshold", type=float, default=5.0, help="涨跌幅阈值百分比（默认5%%）")
+    p_mon.add_argument("--threshold", type=float, default=None,
+                       help="涨跌幅阈值百分比，同时用于涨/跌；缺省时从 output/web_settings.json 读取预警阈值（默认5%%）")
     p_mon.add_argument("--interval", type=int, default=60, help="轮询间隔秒数（默认60秒）")
     p_mon.add_argument("--push", action="store_true", default=True, help="触发时推送通知")
 
@@ -159,6 +161,36 @@ def _formats(settings, args):
     if getattr(args, "pdf", False) and "pdf" not in fmts:
         fmts = fmts + ("pdf",)
     return fmts
+
+
+# Web 设置页保存的预警阈值文件（与 web/app.py 的 WEB_SETTINGS_PATH 保持一致）
+WEB_SETTINGS_PATH = PROJECT_ROOT / "output" / "web_settings.json"
+DEFAULT_ALERT_PCT = 5.0
+
+
+def _load_alert_thresholds(default: float = DEFAULT_ALERT_PCT):
+    """从 output/web_settings.json 读取（上涨, 下跌）预警阈值。
+
+    缺文件 / 解析失败 / 字段非法时都退回 ``default``；下跌阈值取绝对值。
+    """
+    up = down = abs(float(default))
+    try:
+        data = json.loads(WEB_SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return up, down
+    if not isinstance(data, dict):
+        return up, down
+    for field, target in (("alert_up_pct", "up"), ("alert_down_pct", "down")):
+        try:
+            value = abs(float(data.get(field)))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            if target == "up":
+                up = value
+            else:
+                down = value
+    return up, down
 
 
 def _export(title: str, body: str, settings, args, **kwargs):
@@ -508,6 +540,12 @@ def cmd_monitor(args) -> int:
     # 应用 CLI 覆盖项（含日志级别）；监控循环本身不需要 settings 变量
     _settings(args)
 
+    # 阈值：CLI 显式传入则涨/跌两边都用该值；否则读 Web 设置页保存的阈值，再退回 5%
+    if args.threshold is not None:
+        up_threshold = down_threshold = abs(float(args.threshold))
+    else:
+        up_threshold, down_threshold = _load_alert_thresholds()
+
     # 读取自选股列表
     watchlist_file = Path(args.file)
     if not watchlist_file.exists():
@@ -524,7 +562,7 @@ def cmd_monitor(args) -> int:
         print("自选股列表为空")
         return 1
 
-    print(_color(f"开始监控 {len(symbols)} 只自选股（阈值 ±{args.threshold}%，间隔 {args.interval} 秒）", _C.BOLD, _C.CYAN))
+    print(_color(f"开始监控 {len(symbols)} 只自选股（阈值 涨≥+{up_threshold}% / 跌≤-{down_threshold}%，间隔 {args.interval} 秒）", _C.BOLD, _C.CYAN))
     print("=" * 64)
 
     from src.notify import push_brief_result
@@ -546,13 +584,19 @@ def cmd_monitor(args) -> int:
                     pct = float(row.iloc[0]["涨跌幅"])
                     name = row.iloc[0]["名称"]
 
-                    # 检查阈值
-                    key = f"{symbol}_{int(abs(pct) // args.threshold)}"
-                    if abs(pct) >= args.threshold and key not in alerted:
+                    # 检查阈值：上涨用 up 阈值，下跌用 down 阈值（各自取正数比较）
+                    triggered = (pct >= 0 and pct >= up_threshold) or (
+                        pct < 0 and abs(pct) >= down_threshold
+                    )
+                    threshold = up_threshold if pct >= 0 else down_threshold
+                    bucket = int(abs(pct) // threshold) if threshold > 0 else int(abs(pct))
+                    key = f"{symbol}_{bucket}"
+                    if triggered and key not in alerted:
                         alerted.add(key)
                         direction = "上涨" if pct > 0 else "下跌"
+                        limit = up_threshold if pct >= 0 else down_threshold
                         msg = f"⚡ **{name}（{symbol}）{direction}预警**\n\n涨跌幅：{pct:+.2f}%\n最新价：{price:.2f}"
-                        print(_color(f"[{name}] {direction} {pct:+.2f}%", _C.YELLOW, _C.BOLD))
+                        print(_color(f"[{name}] {direction} {pct:+.2f}%（阈值 ±{limit}%）", _C.YELLOW, _C.BOLD))
 
                         if args.push:
                             push_brief_result(f"{name} 涨跌预警", msg, {})

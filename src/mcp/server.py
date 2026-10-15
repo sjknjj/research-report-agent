@@ -1,13 +1,17 @@
 """MCP Server（3.0新增）：把本项目核心能力暴露为标准 MCP 工具。
 
 遵循 Model Context Protocol 基本规范（JSON-RPC 2.0），
-实现了 ``initialize`` / ``notifications/initialized`` / ``ping`` / ``tools/list`` / ``tools/call``，
-Claude Desktop / Cursor 等支持 MCP 的客户端可完成握手并接入本项目作为工具使用。
+实现了 ``initialize`` / ``notifications/initialized`` / ``ping`` / ``tools/list`` / ``tools/call``。
+
+传输层有二：
+- HTTP：``web/app.py`` 的 ``POST /mcp``（裸 JSON-RPC over HTTP，适合 curl / 自研客户端）；
+- stdio：仓库根目录 ``mcp_server.py``（推荐给 Claude Desktop 等要求标准 stdio / Streamable HTTP 的客户端）。
 
 暴露的工具：
 - get_stock_brief：获取 A 股公司投研速览（含反幻觉校验）
 - verify_numbers：数字交叉校验（反幻觉）
 - generate_stock_report：生成完整 A 股研究报告（多智能体流水线）
+- search_web：联网检索（离线/无密钥时安全回退为离线占位结果）
 """
 from __future__ import annotations
 
@@ -59,6 +63,24 @@ TOOLS_DECLARATION = [
                 "deep": {"type": "boolean", "description": "是否启用递归深挖检索"},
             },
             "required": ["topic"],
+        },
+    },
+    {
+        "name": "search_web",
+        "description": (
+            "联网检索资料，返回标题/链接/来源/摘要。"
+            "离线或未配置检索密钥时自动回退为离线占位结果（不会报错）。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "检索关键词，如 低空经济 产业链"},
+                "max_results": {
+                    "type": "integer",
+                    "description": "返回结果条数（可选，默认 5）",
+                },
+            },
+            "required": ["query"],
         },
     },
 ]
@@ -137,11 +159,17 @@ class MCPServer:
         missing = [key for key in _REQUIRED_ARGS[name] if not arguments.get(key)]
         if missing:
             raise JSONRPCError(-32602, f"参数不合法：缺少/为空 {', '.join(missing)}")
+        # search_web 的可选参数在调用前校验，保证非法参数返回 -32602 而不是 isError
+        if name == "search_web" and "max_results" in arguments:
+            max_results = arguments["max_results"]
+            if isinstance(max_results, bool) or not isinstance(max_results, int) or max_results <= 0:
+                raise JSONRPCError(-32602, "max_results 必须是正整数")
 
         handlers = {
             "get_stock_brief": self._tool_brief,
             "verify_numbers": self._tool_verify,
             "generate_stock_report": self._tool_report,
+            "search_web": self._tool_search,
         }
         try:
             result = handlers[name](arguments)
@@ -191,6 +219,47 @@ class MCPServer:
             "content": [{"type": "text", "text": text}],
             "sections": len(report.sections),
             "references": len(report.references),
+        }
+
+    def _tool_search(self, args: dict) -> dict:
+        """联网检索；离线或渠道失败时由 SearchTool 自动回退到离线占位结果。"""
+        from ..tools.search import build_search_tool
+
+        query = str(args.get("query", "")).strip()
+        max_results = args.get("max_results", 5)
+        if isinstance(max_results, bool) or not isinstance(max_results, int) or max_results <= 0:
+            # 理论上 _call_tool 已拦截，这里兜底防御
+            raise JSONRPCError(-32602, "max_results 必须是正整数")
+
+        tool = build_search_tool(self.settings)
+        # 让底层渠道按调用方要求的条数取数（build_search_tool 默认取 settings 里的值）
+        tool.per_query = max_results
+        results = tool.search_many([query], max_total=max_results)
+
+        lines = [f"🔍 「{query}」检索到 {len(results)} 条结果："]
+        for i, item in enumerate(results, 1):
+            lines.append(f"{i}. {item.title}")
+            lines.append(f"   链接：{item.url}")
+            lines.append(f"   来源：{item.source}")
+            if item.snippet:
+                lines.append(f"   摘要：{item.snippet}")
+        if not results:
+            lines.append("（未检索到结果）")
+
+        return {
+            "content": [{"type": "text", "text": "\n".join(lines)}],
+            "query": query,
+            "count": len(results),
+            # 结构化结果：标题 / 链接 / 来源（含摘要）
+            "results": [
+                {
+                    "title": item.title,
+                    "url": item.url,
+                    "source": item.source,
+                    "snippet": item.snippet,
+                }
+                for item in results
+            ],
         }
 
     # ------------------------------------------------------------------

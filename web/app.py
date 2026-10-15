@@ -134,9 +134,15 @@ border-top-color:#0f4c81;border-radius:50%;animation:spin .8s linear infinite;
 vertical-align:middle;margin-right:6px;}
 @keyframes spin{to{transform:rotate(360deg);}}
 .watchlist{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;}
-.watch-item{background:#e6f0fa;color:#0f4c81;padding:6px 12px;
-border-radius:6px;font-size:13px;cursor:pointer;}
+.watch-item{background:#e6f0fa;color:#0f4c81;padding:6px 8px 6px 12px;
+border-radius:6px;font-size:13px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;}
 .watch-item:hover{background:#d0e3f5;}
+.watch-del{display:inline-flex;align-items:center;justify-content:center;
+width:16px;height:16px;line-height:1;border-radius:50%;font-size:14px;
+color:#0f4c81;background:rgba(15,76,129,.12);cursor:pointer;flex:none;}
+.watch-del:hover{background:#dc2626;color:#fff;}
+.quote-alert{background:#fff3cd;border:1px solid #f59e0b;color:#b45309 !important;
+padding:6px 10px;border-radius:6px;}
 .tabs{display:flex;gap:0;border-bottom:1px solid #e5e7eb;margin-bottom:20px;}
 .tab{padding:10px 20px;cursor:pointer;color:#6b7280;border-bottom:2px solid transparent;}
 .tab.active{color:#0f4c81;border-bottom-color:#0f4c81;font-weight:500;}
@@ -600,24 +606,43 @@ function addToWatchlist(){
     alert('已加入自选股：'+sym);
   }
 }
+function removeFromWatchlist(sym){
+  // 从 localStorage 中移除后立即重渲染（列表为空会自动显示空状态）
+  setWatchlist(getWatchlist().filter(s=>s!==sym));
+}
 function renderWatchlist(){
   const list=getWatchlist();
   const el=document.getElementById('watchlist');
   const empty=document.getElementById('watchlist_empty');
-  if(list.length===0){el.innerHTML='';empty.style.display='block';return;}
-  empty.style.display='none';
-  // 之前的模板字符串把 localStorage 内容直接拼进 onclick，含引号即可注入脚本
   el.innerHTML='';
+  if(list.length===0){empty.style.display='block';return;}
+  empty.style.display='none';
+  // 之前的模板字符串把 localStorage 内容直接拼进 onclick，含引号即可注入脚本；
+  // 这里继续用 createElement + addEventListener 的写法，避免任何 HTML 字符串拼接。
   list.forEach(sym=>{
     const span=document.createElement('span');
     span.className='watch-item';
     span.title='点击生成速览';
     span.textContent=sym;
     span.addEventListener('click', ()=>quickBrief(sym));
+
+    const del=document.createElement('span');
+    del.className='watch-del';
+    del.title='从自选股移除';
+    del.setAttribute('role','button');
+    del.setAttribute('aria-label','从自选股移除 '+sym);
+    del.textContent='×';
+    del.addEventListener('click', (ev)=>{
+      ev.stopPropagation();  // 不要连带触发外层的“生成速览”
+      removeFromWatchlist(sym);
+    });
+
+    span.appendChild(del);
     el.appendChild(span);
   });
 }
 renderWatchlist();
+loadAlertThresholds();  // 页面加载时拉取一次预警阈值
 
 async function quickBrief(sym){
   document.getElementById('symbol').value=sym;
@@ -813,6 +838,7 @@ async function saveSettings(){
     if(d.ok){
       status.textContent = '✅ 已保存到 ' + d.config_file + '，推送渠道立即生效';
       status.style.color = '#059669';
+      loadAlertThresholds();  // 阈值改动立即对行情预警生效
     } else {
       status.textContent = '保存失败：' + (d.detail || '未知错误');
       status.style.color = '#dc2626';
@@ -837,6 +863,18 @@ async function loadSettings(){
 
 // 自动刷新：只拉取实时行情快照，不再重新跑整条大模型流水线
 let autoRefreshTimer = null;
+// 预警阈值前端缓存：页面加载 / 保存设置后从 /api/settings 刷新
+let alertThresholds = {up: 5, down: 5};
+async function loadAlertThresholds(){
+  try{
+    const r = await fetch('/api/settings');
+    const d = await r.json();
+    const up = parseFloat(d.alert_up_pct);
+    const down = Math.abs(parseFloat(d.alert_down_pct));
+    if(!isNaN(up)) alertThresholds.up = up;
+    if(!isNaN(down)) alertThresholds.down = down;
+  }catch(e){ /* 读取失败时沿用默认 5% */ }
+}
 async function refreshQuote(){
   const sym = document.getElementById('symbol').value.trim();
   const line = document.getElementById('quote_line');
@@ -844,10 +882,24 @@ async function refreshQuote(){
   try{
     const r = await fetch('/api/quote?symbol='+encodeURIComponent(sym));
     const d = await r.json();
-    if(d.detail){ line.textContent = '行情刷新失败：'+d.detail; return; }
-    const sign = (d.pct_change||0) >= 0 ? '+' : '';
-    line.textContent = (d.name||d.symbol)+' '+d.price+' 元  '+sign+d.pct_change+'%';
-    line.style.color = (d.pct_change||0) >= 0 ? '#dc2626' : '#059669';
+    if(d.detail){ line.textContent = '行情刷新失败：'+d.detail; line.classList.remove('quote-alert'); return; }
+    const pct = Number(d.pct_change) || 0;
+    const sign = pct >= 0 ? '+' : '';
+    const quote = (d.name||d.symbol)+' '+d.price+' 元  '+sign+pct+'%';
+    // 涨幅 ≥ 上涨阈值，或跌幅 ≤ 下跌阈值（下跌阈值取绝对值）时给出醒目预警
+    if(alertThresholds.up > 0 && pct >= alertThresholds.up){
+      line.textContent = '⚡ 涨幅预警 '+sign+pct+'% 超过阈值 '+alertThresholds.up+'%｜'+quote;
+      line.style.color = '#b45309';
+      line.classList.add('quote-alert');
+    } else if(alertThresholds.down > 0 && pct <= -alertThresholds.down){
+      line.textContent = '⚡ 跌幅预警 '+pct+'% 超过阈值 -'+alertThresholds.down+'%｜'+quote;
+      line.style.color = '#b45309';
+      line.classList.add('quote-alert');
+    } else {
+      line.textContent = quote;
+      line.style.color = pct >= 0 ? '#dc2626' : '#059669';
+      line.classList.remove('quote-alert');
+    }
   }catch(e){
     line.textContent = '行情刷新失败：'+e;
   }
@@ -1496,7 +1548,11 @@ def api_save_settings(payload: Dict[str, str]):
 # 3.0：MCP 端点（Model Context Protocol，JSON-RPC 2.0）
 @app.post("/mcp")
 def mcp_endpoint(request: dict):
-    """MCP 标准接口：Claude Desktop / Cursor 可直接接入。
+    """JSON-RPC 2.0 over HTTP 的 MCP 端点（裸 POST，非 Streamable HTTP）。
+
+    这是给脚本 / curl / 自己写的 HTTP 客户端用的 JSON-RPC 接口；
+    Claude Desktop 等要求 Streamable HTTP（session + GET/SSE）的客户端请改用
+    仓库根目录的 stdio 入口 ``python mcp_server.py``（见其顶部配置示例）。
 
     示例调用：
         curl -X POST http://localhost:8000/mcp \\

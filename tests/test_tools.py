@@ -315,8 +315,48 @@ class MCPProtocolTest(unittest.TestCase):
 
         declared = {t["name"] for t in TOOLS_DECLARATION}
         self.assertEqual(
-            declared, {"get_stock_brief", "verify_numbers", "generate_stock_report"}
+            declared,
+            {"get_stock_brief", "verify_numbers", "generate_stock_report", "search_web"},
         )
+
+    def test_search_web_offline_falls_back_to_mock(self):
+        """离线模式下 search_web 必须返回占位结果而不是报错。"""
+        resp = self.server.handle(
+            {
+                "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                "params": {
+                    "name": "search_web",
+                    "arguments": {"query": "低空经济 产业链", "max_results": 2},
+                },
+            }
+        )
+        result = resp["result"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(result["count"], 2)
+        # 结构化结果须含标题/链接/来源
+        for item in result["results"]:
+            self.assertTrue(item["title"])
+            self.assertTrue(item["url"])
+            self.assertEqual(item["source"], "mock")
+        self.assertIn("content", result)
+
+    def test_search_web_invalid_max_results_returns_32602(self):
+        resp = self.server.handle(
+            {
+                "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                "params": {"name": "search_web", "arguments": {"query": "x", "max_results": 0}},
+            }
+        )
+        self.assertEqual(resp["error"]["code"], -32602)
+
+    def test_search_web_missing_query_returns_32602(self):
+        resp = self.server.handle(
+            {
+                "jsonrpc": "2.0", "id": 10, "method": "tools/call",
+                "params": {"name": "search_web", "arguments": {}},
+            }
+        )
+        self.assertEqual(resp["error"]["code"], -32602)
 
 
 if __name__ == "__main__":
