@@ -71,6 +71,42 @@ border-radius:6px;font-size:13px;cursor:pointer;}
 .tab.active{color:#0f4c81;border-bottom-color:#0f4c81;font-weight:500;}
 .tab-content{display:none;}
 .tab-content.active{display:block;}
+
+/* 移动端适配（手机屏幕） */
+@media (max-width: 768px) {
+  body {
+    margin: 10px auto;
+    padding: 0 12px;
+    font-size: 14px;
+  }
+  h1 {
+    font-size: 20px;
+  }
+  .card {
+    padding: 16px;
+    margin: 12px 0;
+  }
+  .row {
+    flex-direction: column;
+    gap: 8px;
+  }
+  .row button {
+    margin-left: 0;
+    width: 100%;
+  }
+  .tabs {
+    overflow-x: auto;
+  }
+  .tab {
+    padding: 8px 12px;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  .result {
+    max-height: 400px;
+    font-size: 13px;
+  }
+}
 </style></head><body>
 <h1>研报辅助 Agent <span class="version">v3.0</span></h1>
 <div class="subtitle">大模型 + AKShare · 数字交叉校验反幻觉 · 多空辩论 · 决策仪表盘</div>

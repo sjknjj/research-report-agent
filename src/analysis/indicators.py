@@ -166,4 +166,56 @@ def _detect_candlestick_patterns(price_df: pd.DataFrame, last: int) -> list:
             if abs(max1 - max2) / max1 < 0.03 and max2 < max1 * 1.02:
                 patterns.append("疑似双顶（M头）形态，可能见顶回落")
 
+    # 5. 看涨吞没（前一天阴线，今天大阳线完全包住昨天）
+    if last >= 1:
+        prev_close = close.iloc[last-1]
+        prev_open = open_.iloc[last-1]
+        curr_close = close.iloc[last]
+        curr_open = open_.iloc[last]
+        if prev_close < prev_open and curr_close > curr_open:
+            if curr_open <= prev_close and curr_close >= prev_open:
+                patterns.append("看涨吞没形态，可能见底反转")
+
+    # 6. 看跌吞没（前一天阳线，今天大阴线完全包住昨天）
+    if last >= 1:
+        prev_close = close.iloc[last-1]
+        prev_open = open_.iloc[last-1]
+        curr_close = close.iloc[last]
+        curr_open = open_.iloc[last]
+        if prev_close > prev_open and curr_close < curr_open:
+            if curr_open >= prev_close and curr_close <= prev_open:
+                patterns.append("看跌吞没形态，可能见顶回落")
+
+    # 7. 早晨之星（三根K线：大阴线 + 小十字星 + 大阳线）
+    if last >= 2:
+        c1_close = close.iloc[last-2]
+        c1_open = open_.iloc[last-2]
+        c2_close = close.iloc[last-1]
+        c2_open = open_.iloc[last-1]
+        c3_close = close.iloc[last]
+        c3_open = open_.iloc[last]
+        body1 = abs(c1_close - c1_open) / c1_open
+        body2 = abs(c2_close - c2_open) / c2_open
+        body3 = abs(c3_close - c3_open) / c3_open
+        if body1 > 0.02 and body2 < 0.01 and body3 > 0.02:
+            if c1_close < c1_open and c3_close > c3_open:
+                if c2_close < c1_open and c3_close > (c1_open + c1_close) / 2:
+                    patterns.append("早晨之星形态，可能见底反转")
+
+    # 8. 黄昏之星（三根K线：大阳线 + 小十字星 + 大阴线）
+    if last >= 2:
+        c1_close = close.iloc[last-2]
+        c1_open = open_.iloc[last-2]
+        c2_close = close.iloc[last-1]
+        c2_open = open_.iloc[last-1]
+        c3_close = close.iloc[last]
+        c3_open = open_.iloc[last]
+        body1 = abs(c1_close - c1_open) / c1_open
+        body2 = abs(c2_close - c2_open) / c2_open
+        body3 = abs(c3_close - c3_open) / c3_open
+        if body1 > 0.02 and body2 < 0.01 and body3 > 0.02:
+            if c1_close > c1_open and c3_close < c3_open:
+                if c2_close > c1_open and c3_close < (c1_open + c1_close) / 2:
+                    patterns.append("黄昏之星形态，可能见顶回落")
+
     return patterns

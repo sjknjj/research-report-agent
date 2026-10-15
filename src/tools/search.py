@@ -129,6 +129,88 @@ class DuckDuckGoSearchProvider(BaseSearchProvider):
         return href
 
 
+class BaiduSearchProvider(BaseSearchProvider):
+    """基于百度搜索的免费检索（无需密钥，国内可用）。"""
+
+    name = "baidu"
+    endpoint = "https://www.baidu.com/s"
+
+    def search(self, query: str, max_results: int = 5) -> List[SearchResult]:
+        url = f"{self.endpoint}?wd={urllib.parse.quote(query)}"
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": _UA},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as resp:
+                html = resp.read().decode("utf-8", errors="ignore")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("百度搜索请求失败：%s", exc)
+            return []
+
+        results: List[SearchResult] = []
+        # 百度搜索结果块
+        blocks = re.split(r'<div class="result\s', html)
+        for block in blocks[1:]:
+            if len(results) >= max_results:
+                break
+            link = re.search(r'<h3[^>]*>.*?<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', block, re.DOTALL)
+            if not link:
+                continue
+            raw_href, raw_title = link.group(1), link.group(2)
+            title = _strip_tags(raw_title)
+            snippet_match = re.search(r'<span class="content-right_8Zs40">(.*?)</span>', block, re.DOTALL)
+            snippet = _strip_tags(snippet_match.group(1)) if snippet_match else ""
+            if title and raw_href.startswith("http"):
+                results.append(
+                    SearchResult(
+                        title=title, url=raw_href, snippet=snippet, source=self.name, query=query
+                    )
+                )
+        return results
+
+
+class BingSearchProvider(BaseSearchProvider):
+    """基于必应搜索的免费检索（无需密钥，国内可用）。"""
+
+    name = "bing"
+    endpoint = "https://www.bing.com/search"
+
+    def search(self, query: str, max_results: int = 5) -> List[SearchResult]:
+        url = f"{self.endpoint}?q={urllib.parse.quote(query)}"
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": _UA},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as resp:
+                html = resp.read().decode("utf-8", errors="ignore")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("必应搜索请求失败：%s", exc)
+            return []
+
+        results: List[SearchResult] = []
+        # 必应搜索结果块
+        blocks = re.split(r'<li class="b_algo"\s', html)
+        for block in blocks[1:]:
+            if len(results) >= max_results:
+                break
+            link = re.search(r'<h2[^>]*>.*?<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', block, re.DOTALL)
+            if not link:
+                continue
+            raw_href, raw_title = link.group(1), link.group(2)
+            title = _strip_tags(raw_title)
+            snippet_match = re.search(r'<p[^>]*class="b_lineclamp[^"]*"[^>]*>(.*?)</p>', block, re.DOTALL)
+            snippet = _strip_tags(snippet_match.group(1)) if snippet_match else ""
+            if title and raw_href.startswith("http"):
+                results.append(
+                    SearchResult(
+                        title=title, url=raw_href, snippet=snippet, source=self.name, query=query
+                    )
+                )
+        return results
+
+
 class TavilySearchProvider(BaseSearchProvider):
     """基于 Tavily Search API 的检索（质量更高，需要密钥）。"""
 
@@ -223,13 +305,28 @@ def build_search_tool(settings: Any) -> SearchTool:
             provider = MockSearchProvider()
     elif provider_name == "duckduckgo":
         provider = DuckDuckGoSearchProvider()
+    elif provider_name == "baidu":
+        provider = BaiduSearchProvider()
+    elif provider_name == "bing":
+        provider = BingSearchProvider()
     else:  # auto
         if settings.effective_mode == "offline":
             provider = MockSearchProvider()
         elif settings.tavily_api_key:
             provider = TavilySearchProvider(settings.tavily_api_key)
         else:
-            provider = DuckDuckGoSearchProvider()
+            # 国内用户优先用百度（不用翻墙），失败了再试必应
+            try:
+                provider = BaiduSearchProvider()
+                # 测试一下能不能用
+                test_results = provider.search("test", max_results=1)
+                if not test_results:
+                    raise Exception("百度搜索无结果")
+            except Exception:
+                try:
+                    provider = BingSearchProvider()
+                except Exception:
+                    provider = DuckDuckGoSearchProvider()
 
     logger.info("检索渠道：%s", provider.name)
     return SearchTool(provider, per_query=settings.max_results_per_query)

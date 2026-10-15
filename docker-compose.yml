@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  research-report-agent:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_MODEL=${LLM_MODEL}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      - FEISHU_WEBHOOK_URL=${FEISHU_WEBHOOK_URL}
+      - WECOM_WEBHOOK_KEY=${WECOM_WEBHOOK_KEY}
+    volumes:
+      - ./output:/app/output
+      - ./watchlist.txt:/app/watchlist.txt
+    restart: unless-stopped

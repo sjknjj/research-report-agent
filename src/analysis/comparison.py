@@ -231,3 +231,64 @@ def valuation_percentile_html(rows: List[CompanyRow]) -> str:
     )
 
     return fig.to_html(full_html=False, include_plotlyjs="cdn")
+
+
+def factor_analysis(rows: List[CompanyRow]) -> List[Dict[str, Any]]:
+    """多因子分析（估值/成长/盈利/动量）。
+
+    返回每家公司的因子得分和综合评分。
+    """
+    results = []
+    for row in rows:
+        # 估值因子（PE/PB 越低越好，反向）
+        pe = row.pe or 20
+        pe_score = max(0, min(100, 100 - (pe - 10) * 5))
+
+        pb = row.pb or 2
+        pb_score = max(0, min(100, 100 - (pb - 1) * 20))
+
+        value_factor = (pe_score + pb_score) / 2
+
+        # 成长因子（营收/净利增速越高越好）
+        rev = row.revenue_yoy or 0
+        rev_score = max(0, min(100, 50 + rev * 2))
+
+        profit = row.profit_yoy or 0
+        profit_score = max(0, min(100, 50 + profit * 2))
+
+        growth_factor = (rev_score + profit_score) / 2
+
+        # 盈利因子（毛利率/ROE 越高越好）
+        gm = row.gross_margin or 30
+        gm_score = max(0, min(100, gm * 1.5))
+
+        roe = row.roe or 10
+        roe_score = max(0, min(100, roe * 5))
+
+        profit_factor = (gm_score + roe_score) / 2
+
+        # 动量因子（近期涨跌幅越高越好）
+        ret = row.period_return or 0
+        momentum_score = max(0, min(100, 50 + ret * 5))
+
+        # 综合评分（加权平均）
+        total_score = (
+            value_factor * 0.25 +      # 估值权重 25%
+            growth_factor * 0.30 +      # 成长权重 30%
+            profit_factor * 0.25 +      # 盈利权重 25%
+            momentum_score * 0.20       # 动量权重 20%
+        )
+
+        results.append({
+            "symbol": row.symbol,
+            "name": row.name,
+            "value_factor": round(value_factor, 1),
+            "growth_factor": round(growth_factor, 1),
+            "profit_factor": round(profit_factor, 1),
+            "momentum_factor": round(momentum_score, 1),
+            "total_score": round(total_score, 1),
+        })
+
+    # 按综合评分排序
+    results.sort(key=lambda x: x["total_score"], reverse=True)
+    return results
