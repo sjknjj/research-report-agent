@@ -1,0 +1,119 @@
+{
+  "symbol": "000858",
+  "name": "000858",
+  "source": "live",
+  "as_of": "2026-10-15 20:28:44",
+  "info": {},
+  "news": [],
+  "price_summary": {
+    "trading_days": 243,
+    "start_date": "2025-10-15",
+    "end_date": "2026-10-15",
+    "latest_close": 71.3,
+    "latest_pct_change": 0.68,
+    "period_return_pct": -39.01,
+    "period_high": 117.8,
+    "period_low": 67.94,
+    "avg_turnover_pct": 0.626,
+    "annual_volatility_pct": 22.67,
+    "ma5": 70.84,
+    "ma20": 70.05,
+    "total_amount_yuan": 534130094835.0,
+    "price_vs_ma20": "站上20日均线"
+  },
+  "financial_summary": {
+    "latest_period": "2026-06-30",
+    "latest": {
+      "revenue_yuan": 28417000000.0,
+      "net_profit_yuan": 8753000000.0,
+      "revenue_yoy_pct": 20.87,
+      "net_profit_yoy_pct": 89.3,
+      "gross_margin_pct": 80.29,
+      "net_margin_pct": 31.66,
+      "roe_pct": 7.14,
+      "eps": 2.2551,
+      "bps": 30.52,
+      "debt_ratio_pct": 34.62
+    },
+    "recent_periods": [
+      {
+        "period": "2026-06-30",
+        "revenue_yuan": 28417000000.0,
+        "net_profit_yuan": 8753000000.0,
+        "revenue_yoy_pct": 20.87,
+        "net_profit_yoy_pct": 89.3,
+        "gross_margin_pct": 80.29,
+        "roe_pct": 7.14,
+        "eps": 2.2551
+      },
+      {
+        "period": "2026-03-31",
+        "revenue_yuan": 22838000000.0,
+        "net_profit_yuan": 8063000000.0,
+        "revenue_yoy_pct": 33.67,
+        "net_profit_yoy_pct": 82.57,
+        "gross_margin_pct": 81.43,
+        "roe_pct": 6.5,
+        "eps": 2.0772
+      },
+      {
+        "period": "2025-12-31",
+        "revenue_yuan": 40529000000.0,
+        "net_profit_yuan": 8954000000.0,
+        "revenue_yoy_pct": -54.55,
+        "net_profit_yoy_pct": -71.89,
+        "gross_margin_pct": 77.54,
+        "roe_pct": 6.89,
+        "eps": 2.3068
+      },
+      {
+        "period": "2025-09-30",
+        "revenue_yuan": 30638000000.0,
+        "net_profit_yuan": 6475000000.0,
+        "revenue_yoy_pct": -54.89,
+        "net_profit_yoy_pct": -74.03,
+        "gross_margin_pct": 75.73,
+        "roe_pct": 4.89,
+        "eps": 1.668
+      },
+      {
+        "period": "2025-06-30",
+        "revenue_yuan": 23510000000.0,
+        "net_profit_yuan": 4624000000.0,
+        "revenue_yoy_pct": -53.58,
+        "net_profit_yoy_pct": -75.74,
+        "gross_margin_pct": 77.87,
+        "roe_pct": 3.41,
+        "eps": 1.1912
+      }
+    ]
+  },
+  "valuation": {},
+  "fund_flow": {},
+  "technicals": {
+    "trend": "震荡",
+    "signals": [],
+    "macd": {
+      "dif": -0.216,
+      "dea": -0.5,
+      "hist": 0.568
+    },
+    "rsi": 54.5,
+    "kdj": {
+      "k": 76.8,
+      "d": 67.7,
+      "j": 95.0
+    },
+    "boll": {
+      "upper": 71.43,
+      "mid": 70.05,
+      "lower": 68.68
+    },
+    "ma": {
+      "ma5": 70.84,
+      "ma20": 70.05,
+      "ma60": 72.43
+    },
+    "close": 71.3
+  }
+}
