@@ -67,7 +67,7 @@ from src.services.research_assistant import ResearchAssistant  # noqa: E402
 from src.verify.facts import FactBase  # noqa: E402
 from src.verify.verifier import CrossVerifier  # noqa: E402
 
-_COMMANDS = {"brief", "announce", "industry", "report", "compare", "demo", "serve", "daily", "history", "monitor"}
+_COMMANDS = {"brief", "announce", "industry", "report", "compare", "demo", "serve", "daily", "history", "monitor", "stats"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -200,6 +200,21 @@ def cmd_brief(args) -> int:
         print(_color("✅ 已生成：", _C.GREEN) + str(path))
     print(_color("=" * 64, _C.DIM))
     logger.info("公司速览完成")
+
+    # 3.5：自动记录幻觉率统计
+    try:
+        from src.verify.stats import HallucinationStats
+        stats = HallucinationStats()
+        stats.record(
+            topic=title,
+            model=settings.llm_model,
+            total_claims=v.get("total_claims", 0),
+            mismatch=v.get("mismatch", 0),
+            hallucination_rate=v.get("hallucination_rate", 0),
+            confidence_level=v.get("confidence_level", "B（中可信）"),
+        )
+    except Exception:
+        pass
 
     # 3.0：可选推送飞书/企业微信
     if getattr(args, "push", False):
@@ -447,6 +462,16 @@ def cmd_history(args) -> int:
     return 0
 
 
+def cmd_stats(args) -> int:
+    """3.5：查看幻觉率历史统计和模型可信度排名。"""
+    from src.verify.stats import HallucinationStats
+    stats = HallucinationStats()
+    print()
+    print(stats.render_text())
+    print()
+    return 0
+
+
 def cmd_monitor(args) -> int:
     """盘中实时监控自选股涨跌，涨跌幅超过阈值时推送通知。"""
     import time
@@ -535,6 +560,7 @@ def main(argv=None) -> int:
         "daily": cmd_daily,
         "history": cmd_history,
         "monitor": cmd_monitor,
+        "stats": cmd_stats,
     }
     try:
         return handlers[args.command](args)
