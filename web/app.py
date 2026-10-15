@@ -553,7 +553,7 @@ async function startBrief(){
     const r=await fetch('/api/brief?symbol='+encodeURIComponent(sym)+'&sources='+encodeURIComponent(sources));
     const d=await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
-    el.innerHTML = marked.parse(d.text);
+    el.innerHTML = marked.parse(d.text || '');
     if(d.verification && d.verification.passed !== undefined){
       const v=d.verification;
       el.innerHTML += `<hr><p style="color:#6b7280;font-size:13px;">交叉校验：${v.passed?'✅ 通过':'⚠️ 未通过'}｜一致${v.supported}、矛盾${v.mismatch}、幻觉率${(v.hallucination_rate*100).toFixed(1)}%</p>`;
@@ -582,7 +582,7 @@ async function startCompare(){
     const r = await fetch('/api/compare?symbols='+encodeURIComponent(symbols));
     const d = await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
-    el.innerHTML = marked.parse(d.text);
+    el.innerHTML = marked.parse(d.text || '');
   }catch(e){el.textContent='请求失败：'+e;}
 }
 
@@ -601,7 +601,7 @@ async function startAnnounce(){
     const r = await fetch('/api/announce?'+params.toString(), {method:'POST'});
     const d = await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
-    el.innerHTML = marked.parse(d.text);
+    el.innerHTML = marked.parse(d.text || '');
     if(d.verification && d.verification.passed !== undefined){
       const v = d.verification;
       el.innerHTML += `<hr><p style="color:#6b7280;font-size:13px;">交叉校验：${v.passed?'✅ 通过':'⚠️ 未通过'}｜幻觉率${(v.hallucination_rate*100).toFixed(1)}%</p>`;
@@ -618,7 +618,7 @@ async function loadStats(){
     const r = await fetch('/api/stats');
     const d = await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
-    el.innerHTML = marked.parse(d.text);
+    el.innerHTML = marked.parse(d.text || '');
   }catch(e){el.textContent='请求失败：'+e;}
 }
 
@@ -633,7 +633,7 @@ async function startSentiment(){
     const r = await fetch('/api/sentiment?symbol='+encodeURIComponent(symbol));
     const d = await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
-    el.innerHTML = marked.parse(d.text);
+    el.innerHTML = marked.parse(d.text || '');
   }catch(e){el.textContent='请求失败：'+e;}
 }
 
@@ -648,7 +648,7 @@ async function startBacktest(){
     const r = await fetch('/api/backtest?symbol='+encodeURIComponent(symbol));
     const d = await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
-    el.innerHTML = marked.parse(d.text);
+    el.innerHTML = marked.parse(d.text || '');
   }catch(e){el.textContent='请求失败：'+e;}
 }
 
@@ -663,7 +663,7 @@ async function startFactor(){
     const r = await fetch('/api/factor?symbol='+encodeURIComponent(symbol));
     const d = await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
-    el.innerHTML = marked.parse(d.text);
+    el.innerHTML = marked.parse(d.text || '');
   }catch(e){el.textContent='请求失败：'+e;}
 }
 
@@ -678,7 +678,7 @@ async function startIndustry(){
     const r = await fetch('/api/industry?name='+encodeURIComponent(name));
     const d = await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
-    el.innerHTML = marked.parse(d.text);
+    el.innerHTML = marked.parse(d.text || '');
   }catch(e){el.textContent='请求失败：'+e;}
 }
 
@@ -733,7 +733,7 @@ async function startReport(){
     } else if(data.type==='done'){
       es.close();
       progEl.innerHTML='✅ 生成完成';
-      resultEl.innerHTML = marked.parse(data.text);
+      resultEl.innerHTML = marked.parse(data.text || '');
     } else if(data.type==='error'){
       es.close();
       progEl.innerHTML='❌ 出错了';
