@@ -7,13 +7,14 @@
 ## 目录
 
 1. [安装与配置](#一安装与配置)
-2. [快速上手](#二快速上手)
-3. [Web 界面使用](#三web-界面使用最直观)
-4. [CLI 命令详解](#四cli-命令详解)
-5. [多数据源配置](#五多数据源配置)
-6. [每日自选股推送](#六每日自选股推送最省心)
-7. [反幻觉统计](#七反幻觉统计)
-8. [常见问题](#八常见问题)
+2. [Docker 一键部署（推荐）](#二docker-一键部署推荐)
+3. [快速上手](#三快速上手)
+4. [Web 界面使用](#四web-界面使用最直观)
+5. [CLI 命令详解](#五cli-命令详解)
+6. [多数据源配置](#六多数据源配置)
+7. [每日自选股推送](#七每日自选股推送最省心)
+8. [反幻觉统计](#八反幻觉统计)
+9. [常见问题](#九常见问题)
 
 ---
 
@@ -55,7 +56,65 @@ LLM_MODEL=deepseek-chat
 
 ---
 
-## 二、快速上手
+## 二、Docker 一键部署（推荐）
+
+**最省心的方式：不用装 Python、不用装依赖、不用配环境，一条命令跑起来。**
+
+### 2.1 前提条件
+
+装好 Docker Desktop（Mac/Windows/Linux 都有）：
+- 下载地址：https://www.docker.com/products/docker-desktop/
+- 装好后打开 Docker Desktop，确保它在运行
+
+### 2.2 一键启动
+
+```bash
+# 克隆代码
+git clone https://github.com/sjknjj/research-report-agent.git
+cd research-report-agent
+
+# 配大模型 key（一行就行）
+echo "LLM_API_KEY=sk-你的key" > .env
+
+# 一键启动！
+docker-compose up -d
+```
+
+**就这么简单，不用装 Python、不用 pip install。**
+
+### 2.3 打开 Web 界面
+
+浏览器打开：http://localhost:8000
+
+所有功能都在网页上，9 个 Tab 随便点。
+
+### 2.4 常用 Docker 命令
+
+```bash
+# 看运行状态
+docker-compose ps
+
+# 看日志（排查问题）
+docker-compose logs -f
+
+# 停止服务
+docker-compose down
+
+# 重启服务
+docker-compose restart
+
+# 更新代码后重新构建
+git pull
+docker-compose up -d --build
+```
+
+### 2.5 数据存在哪？
+
+所有生成的报告、自选股、统计数据都存在当前目录的 `output/` 文件夹里，Docker 容器删了数据也不会丢。
+
+---
+
+## 三、快速上手
 
 ### 2.1 第一个命令（离线演示）
 
