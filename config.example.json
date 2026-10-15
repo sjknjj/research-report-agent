@@ -14,6 +14,7 @@
   "language": "zh",
   "max_review_rounds": 1,
   "deep_search_rounds": 2,
+  "debate_rounds": 2,
   "output_dir": "output",
   "export_formats": ["md", "html"],
   "log_level": "INFO",

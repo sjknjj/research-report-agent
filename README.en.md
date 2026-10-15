@@ -30,23 +30,33 @@ Four defences, **fully active on the company-brief and announcement paths**
 (those have a known target company, so a `FactBase` can be built):
 
 1. **Input constraint** — the model only ever sees a cleaned "fact pack".
-2. **Numeric cross-check** — numbers in the output are matched against the fact
-   base (1% tolerance for amounts, 0.1pp for percentages). Year-over-year values
-   keep their sign; thousands separators are supported.
+2. **Numeric cross-check** — **every** financial number in the output is classified:
+   - `supported` / `mismatch` / `unverifiable` when the number maps to a known metric;
+   - **`unsourced`** when it cannot be tied to the fact base at all — these are
+     listed explicitly instead of being silently ignored.
+   1% tolerance for amounts, 0.1pp for percentages. YoY *and* QoQ values keep their
+   sign; thousands separators are supported; facts are indexed by reporting period.
 3. **Semantic faithfulness check** — an LLM flags claims not supported by the
    fact pack (online mode only).
-4. **Logic review** — citation coverage, accounting-identity checks
-   (assets = liabilities + equity, etc.).
+4. **Logic review & citation grounding** — accounting-identity checks
+   (assets = liabilities + equity, etc.), **in-report contradiction detection**,
+   and, for the deep report, **citation grounding**: every number in the body must
+   appear in the source it cites.
+
+Reported alongside the verdict: **`coverage`** (supported ÷ all financial
+numbers), the **unsourced list**, **internal contradictions**, and
+**`confidence_reasons`** — coverage below 60%/30%, a high unsourced ratio, or
+internal contradictions automatically downgrade the confidence grade.
 
 > ⚠️ **Scope caveat:** the **deep report** (`report`) is topic-based research with
-> no target company, so there is no `FactBase` and **no numeric cross-check**.
-> Its "🛡️ Anti-hallucination overview" section states which checks actually ran
-> and marks the rest as "not enabled"; confidence is reported as "unrated".
-> Use `brief` / `announce` when you need number-level verification.
+> no target company, so there is no `FactBase`. It uses **citation grounding**
+> instead — numbers must be traceable to their cited sources. Its
+> "🛡️ Anti-hallucination overview" states which checks actually ran and marks the
+> rest as "not enabled"; when nothing ran, confidence is "unrated".
 
-Verification has limits we prefer to state openly: only numbers matching the
-built-in metric dictionary (~16 metrics, plus deducted-net-profit) are checked;
-other figures are simply not inspected.
+> ℹ️ "Unsourced" does not mean "hallucinated" — it means *the system could not
+> verify it*. Those numbers still need a human eye. Years, ticker codes and plain
+> counts ("5 companies") are excluded from the coverage denominator.
 
 ---
 
@@ -130,12 +140,19 @@ Any OpenAI-compatible endpoint works: DeepSeek (default), OpenAI, DashScope
 
 ## MCP integration
 
-Start the web service and point an MCP client at `http://localhost:8000/mcp`
-(Streamable HTTP). Implemented methods: `initialize`,
-`notifications/initialized`, `ping`, `tools/list`, `tools/call`.
+Two transports:
+
+- **stdio (recommended for Claude Desktop / Cursor)** — `python mcp_server.py`,
+  configured as `{"command": "python", "args": ["/abs/path/mcp_server.py"]}` in
+  `claude_desktop_config.json`.
+- **HTTP** — `POST /mcp` is plain JSON-RPC over HTTP (no session/SSE), handy for
+  curl and custom clients.
+
+Implemented methods: `initialize`, `notifications/initialized` (no response),
+`ping`, `tools/list`, `tools/call`.
 
 Tools: `get_stock_brief(symbol)`, `verify_numbers(text, symbol)`,
-`generate_stock_report(topic, deep)`.
+`search_web(query, max_results)`, `generate_stock_report(topic, deep)`.
 
 ---
 
