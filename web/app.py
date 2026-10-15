@@ -125,7 +125,9 @@ border-radius:6px;font-size:13px;cursor:pointer;}
       <input id="symbol" placeholder="A 股代码，如 600519" value="600519">
       <button onclick="startBrief()">生成速览</button>
       <button class="secondary" onclick="addToWatchlist()">+ 加入自选</button>
+      <button class="secondary" id="autoRefreshBtn" onclick="toggleAutoRefresh()">▶ 自动刷新</button>
     </div>
+    <div id="autoRefreshStatus" style="font-size:12px;color:#6b7280;margin-top:4px;"></div>
 
     <!-- 数据源选择（并列，可多选） -->
     <div style="margin:16px 0;padding:12px;background:#f8f9fa;border-radius:8px;">
@@ -266,6 +268,25 @@ async function startBrief(){
       el.textContent += `\\n\\n---\\n交叉校验：${v.passed?'通过':'未通过'}｜一致${v.supported}、矛盾${v.mismatch}、幻觉率${(v.hallucination_rate*100).toFixed(1)}%`;
     }
   }catch(e){el.textContent='请求失败：'+e;}
+}
+
+// 自动刷新
+let autoRefreshTimer = null;
+function toggleAutoRefresh(){
+  const btn = document.getElementById('autoRefreshBtn');
+  const status = document.getElementById('autoRefreshStatus');
+  if(autoRefreshTimer){
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+    btn.textContent = '▶ 自动刷新';
+    status.textContent = '';
+  } else {
+    btn.textContent = '⏸ 停止刷新';
+    status.textContent = '每 10 秒自动刷新一次';
+    autoRefreshTimer = setInterval(() => {
+      startBrief();
+    }, 10000);
+  }
 }
 
 async function startReport(){
