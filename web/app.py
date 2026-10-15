@@ -132,7 +132,10 @@ border-radius:6px;font-size:13px;cursor:pointer;}
   <div class="tab" onclick="switchTab('compare')">📊 多公司对比</div>
   <div class="tab" onclick="switchTab('report')">📝 深度研报</div>
   <div class="tab" onclick="switchTab('announce')">📢 公告提炼</div>
-  <div class="tab" onclick="switchTab('stats')">📈 统计</div>
+  <div class="tab" onclick="switchTab('sentiment')">😊 情绪面</div>
+  <div class="tab" onclick="switchTab('backtest')">📈 回测</div>
+  <div class="tab" onclick="switchTab('factor')">⭐ 因子</div>
+  <div class="tab" onclick="switchTab('stats')">📊 统计</div>
   <div class="tab" onclick="switchTab('watchlist')">⭐ 自选股</div>
 </div>
 
@@ -244,6 +247,45 @@ border-radius:6px;font-size:13px;cursor:pointer;}
     </div>
     <div class="tip" style="text-align:center;margin-top:8px;">自动提炼要点 + 跟财报交叉校验数字</div>
     <div id="announce_result" class="result" style="display:none;"></div>
+  </div>
+</div>
+
+<!-- 情绪面分析 Tab -->
+<div id="tab-sentiment" class="tab-content">
+  <div class="card">
+    <h3 style="text-align:center;font-size:20px;margin-bottom:16px;">新闻情绪分析</h3>
+    <div class="row" style="max-width:600px;margin:0 auto;">
+      <input id="sentiment_symbol" placeholder="股票代码，如 600519" value="600519">
+      <button onclick="startSentiment()" style="padding:12px 24px;">分析情绪</button>
+    </div>
+    <div class="tip" style="text-align:center;margin-top:8px;">自动分析最近新闻情绪（正面/负面/中性）</div>
+    <div id="sentiment_result" class="result" style="display:none;"></div>
+  </div>
+</div>
+
+<!-- 回测 Tab -->
+<div id="tab-backtest" class="tab-content">
+  <div class="card">
+    <h3 style="text-align:center;font-size:20px;margin-bottom:16px;">MACD策略回测</h3>
+    <div class="row" style="max-width:600px;margin:0 auto;">
+      <input id="backtest_symbol" placeholder="股票代码，如 600519" value="600519">
+      <button onclick="startBacktest()" style="padding:12px 24px;">开始回测</button>
+    </div>
+    <div class="tip" style="text-align:center;margin-top:8px;">回测MACD金叉死叉策略，看胜率</div>
+    <div id="backtest_result" class="result" style="display:none;"></div>
+  </div>
+</div>
+
+<!-- 因子分析 Tab -->
+<div id="tab-factor" class="tab-content">
+  <div class="card">
+    <h3 style="text-align:center;font-size:20px;margin-bottom:16px;">4因子打分</h3>
+    <div class="row" style="max-width:600px;margin:0 auto;">
+      <input id="factor_symbol" placeholder="股票代码，如 600519" value="600519">
+      <button onclick="startFactor()" style="padding:12px 24px;">开始分析</button>
+    </div>
+    <div class="tip" style="text-align:center;margin-top:8px;">估值/成长/盈利/动量 4因子打分</div>
+    <div id="factor_result" class="result" style="display:none;"></div>
   </div>
 </div>
 
@@ -390,6 +432,51 @@ async function loadStats(){
   el.innerHTML = '<span class="spinner"></span>加载统计中…';
   try{
     const r = await fetch('/api/stats');
+    const d = await r.json();
+    if(d.error){el.textContent='错误：'+d.error;return;}
+    el.innerHTML = marked.parse(d.text);
+  }catch(e){el.textContent='请求失败：'+e;}
+}
+
+// 情绪面分析
+async function startSentiment(){
+  const symbol = document.getElementById('sentiment_symbol').value.trim();
+  if(!symbol){alert('请输入股票代码');return;}
+  const el = document.getElementById('sentiment_result');
+  el.style.display = 'block';
+  el.innerHTML = '<span class="spinner"></span>分析新闻情绪中…';
+  try{
+    const r = await fetch('/api/sentiment?symbol='+encodeURIComponent(symbol));
+    const d = await r.json();
+    if(d.error){el.textContent='错误：'+d.error;return;}
+    el.innerHTML = marked.parse(d.text);
+  }catch(e){el.textContent='请求失败：'+e;}
+}
+
+// 回测
+async function startBacktest(){
+  const symbol = document.getElementById('backtest_symbol').value.trim();
+  if(!symbol){alert('请输入股票代码');return;}
+  const el = document.getElementById('backtest_result');
+  el.style.display = 'block';
+  el.innerHTML = '<span class="spinner"></span>回测MACD策略中…';
+  try{
+    const r = await fetch('/api/backtest?symbol='+encodeURIComponent(symbol));
+    const d = await r.json();
+    if(d.error){el.textContent='错误：'+d.error;return;}
+    el.innerHTML = marked.parse(d.text);
+  }catch(e){el.textContent='请求失败：'+e;}
+}
+
+// 因子分析
+async function startFactor(){
+  const symbol = document.getElementById('factor_symbol').value.trim();
+  if(!symbol){alert('请输入股票代码');return;}
+  const el = document.getElementById('factor_result');
+  el.style.display = 'block';
+  el.innerHTML = '<span class="spinner"></span>计算4因子打分中…';
+  try{
+    const r = await fetch('/api/factor?symbol='+encodeURIComponent(symbol));
     const d = await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
     el.innerHTML = marked.parse(d.text);
@@ -571,6 +658,42 @@ def api_stats():
         stats = HallucinationStats()
         text = stats.render_markdown()
         return {"text": text}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/sentiment")
+def api_sentiment(symbol: str):
+    """情绪面分析。"""
+    from src.analysis.sentiment import analyze_sentiment
+
+    try:
+        result = analyze_sentiment(symbol)
+        return {"text": result}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/backtest")
+def api_backtest(symbol: str, days: int = 60):
+    """回测功能。"""
+    from src.analysis.backtest import backtest_macd
+
+    try:
+        result = backtest_macd(symbol, days=days)
+        return {"text": result}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/factor")
+def api_factor(symbol: str):
+    """因子分析。"""
+    from src.analysis.comparison import factor_analysis
+
+    try:
+        result = factor_analysis(symbol)
+        return {"text": result}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc))
 
