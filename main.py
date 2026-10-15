@@ -176,34 +176,9 @@ def cmd_brief(args) -> int:
 
 
 def _push_brief(title: str, text: str, verification: dict, settings) -> None:
-    """3.0：把速览结果推送到飞书/企业微信（按配置自动选择渠道）。"""
-    import os
-    from src.notify import FeishuNotifier, WeComNotifier
-
-    feishu_url = os.getenv("FEISHU_WEBHOOK_URL", "")
-    wecom_key = os.getenv("WECOM_WEBHOOK_KEY", "")
-
-    if not feishu_url and not wecom_key:
-        print("推送：未配置 FEISHU_WEBHOOK_URL / WECOM_WEBHOOK_KEY，跳过")
-        return
-
-    v = verification or {}
-    summary = (
-        f"**{title}**\n\n"
-        f"- 交叉校验：{'通过' if v.get('passed') else '未通过'}"
-        f"（一致{v.get('supported', 0)}、矛盾{v.get('mismatch', 0)}）\n"
-        f"- 幻觉率：{v.get('hallucination_rate', 0):.1%}\n\n"
-        f"{text[:800]}..."
-    )
-
-    if feishu_url:
-        feishu = FeishuNotifier(feishu_url, os.getenv("FEISHU_SECRET"))
-        if feishu.send_markdown(title, summary):
-            print("已推送：飞书")
-    if wecom_key:
-        wecom = WeComNotifier(wecom_key)
-        if wecom.send_markdown(summary):
-            print("已推送：企业微信")
+    """3.0：把速览结果推送到飞书/企业微信（公共实现已下沉到 src.notify）。"""
+    from src.notify import push_brief_result
+    push_brief_result(title, text, verification)
 
 
 def cmd_announce(args) -> int:

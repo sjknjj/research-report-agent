@@ -8,6 +8,21 @@
 
 ---
 
+## 🔧 v3.2 架构重构（代码瘦身 + 可维护性提升）
+
+本次重构围绕**消除重复代码、统一公共能力**展开，代码总行数减少约 300 行，同时保持所有功能完全不变：
+
+| 重构项 | 说明 | 效果 |
+| --- | --- | --- |
+| **BaseAgent 统一 LLM 调用** | 在基类新增 `_safe_chat_json()` / `_safe_chat()` 两个方法，自动 try/except + 兜底数据 | 5 个 agent 各自手写的 ~80 行重复 try/except 全部删除，统一兜底逻辑 |
+| **配置单例缓存** | 新增 `get_settings()` 模块级单例，Web / MCP 常驻进程只加载一次 .env | 避免每个 API 端点重复读盘，响应更快 |
+| **推送能力下沉** | `push_brief_result()` 公共函数下沉到 `src/notify/` 公共层 | CLI / Web / MCP 三个入口共用一套推送逻辑，不用各自重复实现 |
+| **死代码清理** | 删除 4 个 agent 中不再使用的 `LLMError` import | 代码更干净 |
+
+> 本次重构为**纯内部优化**，所有对外接口、CLI 命令、Web API、MCP 工具签名完全不变，已有代码无需任何改动即可升级。
+
+---
+
 ## 🆕 v3.0 版本更新内容
 
 本次升级围绕**性能、体验、反幻觉深度**三个方向做了核心改造：
@@ -478,4 +493,7 @@ python3 -m unittest discover -s tests -v     # 21 项：清洗 / 反幻觉 / 助
 
 ## License
 
-[MIT](LICENSE)
+[GNU AGPL v3.0](LICENSE)
+
+> 本项目采用 GNU Affero General Public License v3.0 开源协议。
+> 如果你在网络服务器上修改并使用本项目，需向所有用户公开修改后的完整源代码。

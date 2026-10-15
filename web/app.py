@@ -23,7 +23,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from src.agent.orchestrator import ResearchOrchestrator
-from src.common.config import load_settings
+from src.common.config import get_settings
 from src.export.exporter import export_assistant, export_report
 from src.services.research_assistant import ResearchAssistant
 
@@ -243,7 +243,7 @@ def index():
 
 @app.get("/api/brief", response_model=BriefResponse)
 def api_brief(symbol: str):
-    settings = load_settings()
+    settings = get_settings()
     ra = ResearchAssistant(settings)
     try:
         result = ra.company_brief(symbol, prefer_live=True)
@@ -264,7 +264,7 @@ def api_brief(symbol: str):
 
 @app.get("/api/report", response_model=ReportResponse)
 def api_report(topic: str, deep: bool = False):
-    settings = load_settings()
+    settings = get_settings()
     orchestrator = ResearchOrchestrator(settings)
     try:
         report = orchestrator.run(topic, deep=deep)
@@ -287,7 +287,7 @@ def api_report(topic: str, deep: bool = False):
 async def api_report_stream(topic: str, deep: bool = False):
     """Server-Sent Events 实时推送研报生成进度，完成后返回全文。"""
     async def generate():
-        settings = load_settings()
+        settings = get_settings()
         orchestrator = ResearchOrchestrator(settings)
 
         # 收集每步完成事件
@@ -335,7 +335,7 @@ def mcp_endpoint(request: dict):
           -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
     """
     from src.mcp.server import MCPServer
-    settings = load_settings()
+    settings = get_settings()
     server = MCPServer(settings)
     return server.handle(request)
 

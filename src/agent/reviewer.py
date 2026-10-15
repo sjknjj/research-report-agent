@@ -5,7 +5,6 @@ import re
 from typing import List, Tuple
 
 from ..common.schema import AgentContext, ResearchReport, ReviewResult
-from ..llm.client import LLMError
 from .base import BaseAgent
 
 _SYSTEM_PROMPT = (
@@ -91,22 +90,19 @@ class ReviewerAgent(BaseAgent):
             self._system(_SYSTEM_PROMPT),
             self._user(f"报告内容如下：\n\n{markdown}\n\n请输出审校 JSON。"),
         ]
-        try:
-            data = self.llm.chat_json(
-                messages,
-                stage="review",
-                context={"section_count": len(report.sections)},
-                temperature=0.1,
-            )
-            return ReviewResult(
-                passed=bool(data.get("passed", True)),
-                score=int(data.get("score", 80)),
-                issues=[str(i) for i in data.get("issues", []) if i],
-                suggestions=[str(s) for s in data.get("suggestions", []) if s],
-            )
-        except (LLMError, AttributeError, ValueError, TypeError) as exc:
-            self.logger.warning("在线审校不可用，仅采用机械校验：%s", exc)
-            return ReviewResult(passed=True, score=80, issues=[], suggestions=[])
+        data = self._safe_chat_json(
+            messages,
+            fallback={"passed": True, "score": 80, "issues": [], "suggestions": []},
+            stage="review",
+            context={"section_count": len(report.sections)},
+            temperature=0.1,
+        )
+        return ReviewResult(
+            passed=bool(data.get("passed", True)),
+            score=int(data.get("score", 80)),
+            issues=[str(i) for i in data.get("issues", []) if i],
+            suggestions=[str(s) for s in data.get("suggestions", []) if s],
+        )
 
     @staticmethod
     def _render_for_review(report: ResearchReport) -> str:

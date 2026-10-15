@@ -12,7 +12,6 @@ from ..common.schema import (
     ReportSection,
     ResearchReport,
 )
-from ..llm.client import LLMError
 from .base import BaseAgent
 
 _SECTION_SYSTEM = (
@@ -176,16 +175,13 @@ class WriterAgent(BaseAgent):
                 f"研究主题：{topic}\n各章节要点：\n{digest}{instruction}\n请撰写报告摘要。"
             ),
         ]
-        try:
-            text = self.llm.chat(
-                messages,
-                stage="abstract",
-                context={"topic": topic, "headings": [n.heading for n in notes]},
-                temperature=0.4,
-            )
-        except LLMError as exc:
-            self.logger.warning("摘要生成失败，使用占位：%s", exc)
-            text = f"（围绕「{topic}」的摘要占位，在线模式将自动生成。）"
+        text = self._safe_chat(
+            messages,
+            fallback=f"（围绕「{topic}」的摘要占位，在线模式将自动生成。）",
+            stage="abstract",
+            context={"topic": topic, "headings": [n.heading for n in notes]},
+            temperature=0.4,
+        )
         return self._clean(text)
 
     def _write_section(
@@ -203,16 +199,13 @@ class WriterAgent(BaseAgent):
                 f"分析要点：\n{bullets}{instruction}\n请撰写该章节正文。"
             ),
         ]
-        try:
-            text = self.llm.chat(
-                messages,
-                stage="write_section",
-                context={"heading": note.heading, "bullets": note.bullet_points},
-                temperature=0.5,
-            )
-        except LLMError as exc:
-            self.logger.warning("章节「%s」生成失败，使用要点兜底：%s", note.heading, exc)
-            text = bullets
+        text = self._safe_chat(
+            messages,
+            fallback=bullets,
+            stage="write_section",
+            context={"heading": note.heading, "bullets": note.bullet_points},
+            temperature=0.5,
+        )
         return self._clean(text)
 
     @staticmethod

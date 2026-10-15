@@ -184,3 +184,19 @@ def load_settings(
 
     settings.resolve_effective_mode()
     return settings
+
+
+# -- 模块级单例缓存（Web/MCP 等常驻进程只需要加载一次） ----------------
+_cached_settings: Optional[Settings] = None
+
+
+def get_settings(cli_overrides: Optional[Dict[str, Any]] = None) -> Settings:
+    """获取配置单例：第一次调用时加载 .env / config.json，之后直接返回缓存。
+
+    CLI 入口请用 ``load_settings()`` 以确保每次都重新读环境变量；
+    Web / MCP / 常驻服务请用 ``get_settings()`` 以避免重复读盘。
+    """
+    global _cached_settings
+    if _cached_settings is None:
+        _cached_settings = load_settings(cli_overrides=cli_overrides)
+    return _cached_settings

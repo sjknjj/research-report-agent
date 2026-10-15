@@ -5,7 +5,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List
 
 from ..common.schema import AgentContext, AnalysisNote, SearchResult, SectionPlan
-from ..llm.client import LLMError
 from .base import BaseAgent
 
 _SYSTEM_PROMPT = (
@@ -81,27 +80,26 @@ class AnalystAgent(BaseAgent):
             ),
         ]
         offline_evidence = [self._result_brief(results[i - 1]) for i in evidence_idx]
-        try:
-            data = self.llm.chat_json(
-                messages,
-                stage="section_analysis",
-                context={
-                    "heading": section.heading,
-                    "evidence": offline_evidence,
-                    "citation_indexes": evidence_idx,
-                },
-                temperature=0.3,
-            )
-            bullets = [str(b) for b in data.get("bullet_points", []) if b]
-            cites = [int(c) for c in data.get("citation_indexes", []) if str(c).isdigit()]
-            cites = [c for c in cites if c in evidence_idx]
-        except (LLMError, AttributeError, ValueError, TypeError) as exc:
-            self.logger.warning("章节「%s」分析解析失败，使用兜底要点：%s", section.heading, exc)
-            bullets = [
-                f"{section.heading}：需结合资料界定口径并给出量化与定性判断。",
-                "关键论断应标注资料编号，确保可追溯。",
-            ]
-            cites = evidence_idx[:2]
+        data = self._safe_chat_json(
+            messages,
+            fallback={
+                "bullet_points": [
+                    f"{section.heading}：需结合资料界定口径并给出量化与定性判断。",
+                    "关键论断应标注资料编号，确保可追溯。",
+                ],
+                "citation_indexes": evidence_idx[:2],
+            },
+            stage="section_analysis",
+            context={
+                "heading": section.heading,
+                "evidence": offline_evidence,
+                "citation_indexes": evidence_idx,
+            },
+            label=section.heading,
+        )
+        bullets = [str(b) for b in data.get("bullet_points", []) if b]
+        cites = [int(c) for c in data.get("citation_indexes", []) if str(c).isdigit()]
+        cites = [c for c in cites if c in evidence_idx]
 
         if not bullets:
             bullets = [f"{section.heading}：现有资料有限，建议补充权威来源后再下结论。"]
