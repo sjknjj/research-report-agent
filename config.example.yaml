@@ -53,6 +53,12 @@ analysis:
   include_industry_chain: true           # 产业链上下游分析
   include_candlestick_patterns: true      # K线形态识别（头肩顶/双底等）
 
+# ===== 数据源配置（v3.7新增）=====
+data_source:
+  primary: "akshare"                       # 主数据源：akshare（目前唯一支持的在线数据源）
+  fallback_enabled: true                   # 主数据源挂了是否自动切到离线样例
+  cross_check_enabled: false               # 多源交叉验证（未来加第二个数据源后启用）
+
 # ===== 高级选项 =====
 advanced:
   deep_search_rounds: 2                   # 深挖模式下的补充检索轮数
