@@ -1,17 +1,18 @@
-"""多数据源管理器（v3.7新增）。
+"""多数据源管理器（v3.7新增，插件式架构，不设上限）。
 
 功能：
-1. 支持配置多个数据源（主 + 备）
+1. 支持配置任意多个数据源（不设上限）
 2. 主数据源挂了自动切备数据源（容灾）
 3. 多源交叉验证：同一个数字，多个来源不一致时自动标记"数据存疑"
 4. 用户在 config.yaml 里选想用哪些数据源
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional
 
 from ..common.logger import get_logger
-from .sources import AKShareSource, DataSourceError
+from .sources import AKShareSource, DataSourceBase, DataSourceError, build_data_source
 
 logger = get_logger("data.manager")
 
@@ -92,3 +93,45 @@ class DataSourceManager:
                 continue
 
         return warnings
+
+
+def build_manager_from_config(config: Optional[Dict[str, Any]] = None) -> DataSourceManager:
+    """
+    从配置构建多数据源管理器（插件式，不设上限）。
+
+    配置示例（config.yaml 里的 data_source 段）：
+    ```yaml
+    data_source:
+      sources:
+        - akshare
+        - tushare
+      auto_failover: true
+      cross_check_enabled: true
+    ```
+    """
+    config = config or {}
+    source_names = config.get("sources", ["akshare"])
+    auto_failover = config.get("auto_failover", True)
+    cross_check = config.get("cross_check_enabled", True)
+
+    sources: List[DataSourceBase] = []
+    for name in source_names:
+        try:
+            # 不同数据源传不同的参数
+            kwargs = {}
+            if name == "tushare":
+                kwargs["token"] = os.getenv("TUSHARE_TOKEN", "")
+            if name == "mcp":
+                kwargs["server_url"] = os.getenv("MCP_SERVER_URL", "")
+
+            source = build_data_source(name, **kwargs)
+            sources.append(source)
+            logger.info("已加载数据源：%s", name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("数据源 %s 加载失败，跳过：%s", name, exc)
+
+    if not sources:
+        logger.warning("没有可用的数据源，回退到 AKShare")
+        sources = [AKShareSource()]
+
+    return DataSourceManager(sources=sources, enable_cross_check=cross_check)

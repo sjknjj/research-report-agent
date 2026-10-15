@@ -24,8 +24,34 @@ class DataSourceError(RuntimeError):
     """数据抓取异常。"""
 
 
-class AKShareSource:
-    """AKShare 实时数据来源。"""
+class DataSourceBase:
+    """所有数据源的抽象基类（v3.7新增，插件式架构）。
+
+    想加新数据源只要：
+    1. 继承这个基类
+    2. 实现 price_daily / financial_abstract / stock_info 三个方法
+    3. 在 config.yaml 里配置启用
+    """
+
+    name: str = "base"  # 数据源名称，用于配置和交叉验证
+
+    def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
+        """获取日线行情。返回 DataFrame。"""
+        raise NotImplementedError
+
+    def financial_abstract(self, symbol: str):
+        """获取财务摘要。返回 DataFrame。"""
+        raise NotImplementedError
+
+    def stock_info(self, symbol: str):
+        """获取个股基本信息。返回 DataFrame。"""
+        raise NotImplementedError
+
+
+class AKShareSource(DataSourceBase):
+    """AKShare 实时数据来源（东财+同花顺多接口）。"""
+
+    name = "akshare"
 
     def __init__(self, retry: int = 3, backoff: float = 1.5):
         self.retry = retry
@@ -154,3 +180,102 @@ class AKShareSource:
                 code = code[len(prefix):]
         code = code.split(".")[0]
         return code.zfill(6) if code.isdigit() else code
+
+
+# ============================================================
+# v3.7新增：其他主流数据源适配器（插件式，用户有Key就能用）
+# ============================================================
+
+class TushareSource(DataSourceBase):
+    """Tushare 数据源（需要 Token，积分制）。
+
+    申请地址：https://tushare.pro/register?reg=7
+    配置：在 .env 里加 TUSHARE_TOKEN=你的token
+    """
+
+    name = "tushare"
+
+    def __init__(self, token: str = ""):
+        self.token = token
+        self._ts = None
+
+    @property
+    def ts(self):
+        if self._ts is None:
+            try:
+                import tushare as ts  # noqa: PLC0415
+            except ImportError as exc:
+                raise DataSourceError("未安装 tushare，请先执行：pip install tushare") from exc
+            if not self.token:
+                raise DataSourceError("未配置 TUSHARE_TOKEN，请在 .env 里设置")
+            ts.set_token(self.token)
+            self._ts = ts.pro_api()
+        return self._ts
+
+    def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
+        ts_code = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        return self.ts.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+
+    def financial_abstract(self, symbol: str):
+        ts_code = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        return self.ts.income(ts_code=ts_code)
+
+    def stock_info(self, symbol: str):
+        ts_code = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        return self.ts.stock_basic(ts_code=ts_code)
+
+
+class MCPSource(DataSourceBase):
+    """通过 MCP 协议接外部数据源（v3.7新增）。
+
+    用法：
+    1. 你有一个外部的 MCP Server（比如别的金融数据MCP）
+    2. 在配置里指定 MCP Server 的地址
+    3. 我们通过 MCP 协议调用它的工具取数
+
+    注意：目前是占位实现，未来完善
+    """
+
+    name = "mcp"
+
+    def __init__(self, server_url: str = "", tool_prefix: str = "stock_"):
+        self.server_url = server_url
+        self.tool_prefix = tool_prefix
+
+    def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
+        raise DataSourceError("MCPSource 目前是占位实现，请用 AKShare 或 Tushare")
+
+    def financial_abstract(self, symbol: str):
+        raise DataSourceError("MCPSource 目前是占位实现，请用 AKShare 或 Tushare")
+
+    def stock_info(self, symbol: str):
+        raise DataSourceError("MCPSource 目前是占位实现，请用 AKShare 或 Tushare")
+
+
+class OfflineSource(DataSourceBase):
+    """离线样例数据源（容灾用，主数据源挂了自动切这个）。"""
+
+    name = "offline"
+
+    def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
+        raise DataSourceError("OfflineSource 只提供静态样例，不支持动态取数")
+
+    def financial_abstract(self, symbol: str):
+        raise DataSourceError("OfflineSource 只提供静态样例，不支持动态取数")
+
+    def stock_info(self, symbol: str):
+        raise DataSourceError("OfflineSource 只提供静态样例，不支持动态取数")
+
+
+def build_data_source(source_name: str, **kwargs) -> DataSourceBase:
+    """根据名称构建数据源（插件式工厂函数）。"""
+    sources = {
+        "akshare": AKShareSource,
+        "tushare": TushareSource,
+        "mcp": MCPSource,
+        "offline": OfflineSource,
+    }
+    cls = sources.get(source_name)
+    if cls is None:
+        raise DataSourceError(f"未知数据源：{source_name}，可选：{list(sources.keys())}")
+    return cls(**kwargs)
