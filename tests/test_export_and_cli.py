@@ -116,6 +116,11 @@ class PdfFailureTest(unittest.TestCase):
             pdf_export._find_cjk_font = original
 
 
+def _js_escaped(text: str) -> str:
+    """plotly 序列化时把非 ASCII 转义成 \\uXXXX，生成同样形式以便断言。"""
+    return text.encode("unicode_escape").decode("ascii")
+
+
 class PlotlyInjectionTest(unittest.TestCase):
     def test_inject_once_offline(self):
         try:
@@ -153,6 +158,61 @@ class PlotlyInjectionTest(unittest.TestCase):
         self.assertNotIn('src="https://cdn.plot.ly', injected)
         # 再次注入应保持幂等
         self.assertEqual(len(ensure_plotly_js(injected)), len(injected))
+
+    def test_financial_trend_draws_gross_margin_on_right_axis(self):
+        try:
+            import pandas as pd
+            import plotly  # noqa: F401
+        except ImportError:
+            self.skipTest("plotly/pandas 未安装")
+        from src.export.charts import financial_trend_chart
+
+        fin_df = pd.DataFrame({
+            "period": pd.to_datetime([
+                "2023-03-31", "2023-06-30", "2023-09-30",
+                "2023-12-31", "2024-03-31",
+            ]),
+            "revenue": [1e9, 1.1e9, 1.2e9, 1.3e9, 1.4e9],
+            "net_profit": [1e8, 1.1e8, 1.2e8, 1.3e8, 1.4e8],
+            "gross_margin": [41.0, 42.3, 43.1, 44.5, 45.2],
+        })
+        html = financial_trend_chart(fin_df)
+        self.assertTrue(html)
+        compact = html.replace(" ", "")
+        # 折线 trace 存在，且显式绑定到右侧第二 Y 轴
+        self.assertIn('"mode":"lines+markers"', compact)
+        self.assertIn('"yaxis":"y2"', compact)
+        self.assertIn("yaxis2", html)
+        self.assertIn(_js_escaped("销售毛利率(%)"), html)
+        self.assertNotIn('src="https://cdn.plot.ly', html)
+        # X 轴使用格式化后的报告期
+        self.assertIn("2024-03-31", html)
+
+    def test_financial_trend_without_gross_margin(self):
+        try:
+            import pandas as pd
+            import plotly  # noqa: F401
+        except ImportError:
+            self.skipTest("plotly/pandas 未安装")
+        from src.export.charts import financial_trend_chart
+
+        base = {
+            "period": pd.to_datetime(["2023-12-31", "2024-03-31"]),
+            "revenue": [1e9, 1.4e9],
+            "net_profit": [1e8, 1.4e8],
+        }
+        # (a) 完全没有该列
+        html = financial_trend_chart(pd.DataFrame(base))
+        self.assertTrue(html)
+        self.assertIn(_js_escaped("营业总收入(亿元)"), html)
+        self.assertNotIn(_js_escaped("销售毛利率"), html)
+        self.assertNotIn('"yaxis":"y2"', html.replace(" ", ""))
+        # (b) 有列但全为空，同样不画空折线、不建右轴
+        with_nan = dict(base, gross_margin=[None, None])
+        html_nan = financial_trend_chart(pd.DataFrame(with_nan))
+        self.assertTrue(html_nan)
+        self.assertNotIn(_js_escaped("销售毛利率"), html_nan)
+        self.assertNotIn('"yaxis":"y2"', html_nan.replace(" ", ""))
 
 
 class CliParserTest(unittest.TestCase):

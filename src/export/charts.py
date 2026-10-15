@@ -109,8 +109,28 @@ def kline_with_volume(price_df: Optional[pd.DataFrame]) -> str:
     return fig.to_html(full_html=False, include_plotlyjs=False, div_id="kline-chart")
 
 
+def _format_period(value) -> str:
+    """把报告期转成可读的日期字符串；非日期（如 "2023Q1"）原样返回。"""
+    if isinstance(value, str):
+        return value
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if hasattr(value, "strftime"):
+        try:
+            return value.strftime("%Y-%m-%d")
+        except (TypeError, ValueError):
+            pass
+    return str(value)
+
+
 def financial_trend_chart(financial_df: Optional[pd.DataFrame]) -> str:
-    """近五期营收/净利润趋势柱状图。"""
+    """近五期营收/净利润（柱）+ 毛利率（右轴折线）趋势图。
+
+    gross_margin 列缺失或全为空时只画原有两条柱状，不影响自包含 HTML 约定。
+    """
     if financial_df is None or financial_df.empty:
         return ""
     go, _ = _load_plotly()
@@ -118,7 +138,7 @@ def financial_trend_chart(financial_df: Optional[pd.DataFrame]) -> str:
         return ""
 
     df = financial_df.head(5).iloc[::-1]
-    periods = [str(p) for p in df["period"]]
+    periods = [_format_period(p) for p in df["period"]]
     revenue = df.get("revenue", pd.Series(dtype=float)) / 1e8
     net_profit = df.get("net_profit", pd.Series(dtype=float)) / 1e8
 
@@ -127,6 +147,20 @@ def financial_trend_chart(financial_df: Optional[pd.DataFrame]) -> str:
                          marker_color="#0984e3"))
     fig.add_trace(go.Bar(x=periods, y=net_profit, name="归母净利润(亿元)",
                          marker_color="#fdcb6e"))
+
+    # 毛利率单独走右侧 Y 轴（%），避免与“亿元”混在同一量纲上
+    gross_margin = None
+    if "gross_margin" in df.columns:
+        gm = pd.to_numeric(df["gross_margin"], errors="coerce")
+        if gm.notna().any():
+            gross_margin = gm
+    if gross_margin is not None:
+        fig.add_trace(go.Scatter(
+            x=periods, y=gross_margin, name="销售毛利率(%)",
+            mode="lines+markers", yaxis="y2",
+            line=dict(color="#e17055", width=2), marker=dict(size=7),
+        ))
+
     fig.update_layout(
         barmode="group", height=320,
         title="近五期财务趋势",
@@ -134,6 +168,14 @@ def financial_trend_chart(financial_df: Optional[pd.DataFrame]) -> str:
         font=dict(family="PingFang SC, Microsoft YaHei, sans-serif", size=12),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
+    fig.update_yaxes(title_text="金额(亿元)", showgrid=True)
+    if gross_margin is not None:
+        fig.update_layout(
+            yaxis2=dict(
+                title="销售毛利率(%)", overlaying="y", side="right",
+                ticksuffix="%", showgrid=False, zeroline=False,
+            )
+        )
     return fig.to_html(full_html=False, include_plotlyjs=False, div_id="fin-trend")
 
 
