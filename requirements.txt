@@ -1,0 +1,37 @@
+# ============================================================
+# 依赖清单
+# ------------------------------------------------------------
+# 安装：pip install -r requirements.txt
+# 一键安装全部（含图表/Web/PDF/图谱）：
+#   pip install -r requirements.txt
+# 核心功能仅需：akshare pandas numpy requests
+# ============================================================
+
+# ===== A 股数据能力（brief / announce / industry / compare 需要）=====
+akshare>=1.14
+pandas>=2.0
+numpy>=1.24
+
+# ===== HTTP 请求（大模型接口 / 网页抓取 / embedding）=====
+requests>=2.31
+
+# ===== 可视化与 PDF（推荐安装）=====
+plotly>=5.20            # K线/财务趋势/估值仪表盘（嵌入 HTML）
+matplotlib>=3.7         # 产业链关系图、PDF 图表渲染
+networkx>=3.0           # 产业链图谱布局
+
+# ===== PDF 导出（python main.py brief ... --pdf）=====
+reportlab>=4.0
+
+# ===== Web 服务（python main.py serve）=====
+# fastapi>=0.110
+# uvicorn>=0.29
+
+# ===== 可选增强 =====
+# 语义层反幻觉评估（deepeval 已安装时自动启用 faithfulness 指标）
+# deepeval>=2.0
+# httpx>=0.27
+# openai>=1.30
+# trafilatura>=1.8
+# pytest>=8.0
+# ============================================================

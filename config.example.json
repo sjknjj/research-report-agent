@@ -1,0 +1,19 @@
+{
+  "mode": "auto",
+  "llm_base_url": "https://api.deepseek.com/v1",
+  "llm_model": "deepseek-chat",
+  "temperature": 0.3,
+  "max_tokens": 2048,
+  "request_timeout": 60,
+
+  "search_provider": "auto",
+  "max_results_per_query": 5,
+  "max_fetch_pages": 3,
+  "fetch_content_chars": 2000,
+
+  "language": "zh",
+  "max_review_rounds": 1,
+  "output_dir": "output",
+  "export_formats": ["md", "html"],
+  "log_level": "INFO"
+}

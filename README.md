@@ -1,0 +1,301 @@
+# 研报辅助 Agent 3.0 · Research Report Agent
+
+基于 **大模型 + AKShare** 的轻量化 A 股投研助手：批量抓取 A 股上市公司**公开行情与财报数据并完成清洗**，
+调用**大模型 API**自动汇总行业信息、提炼公告要点，并通过**确定性的数字交叉校验**约束模型输出，
+系统性规避 AI「数字幻觉」。同时内置一套通用多智能体网页研报流水线。
+
+> **完整使用教程见 [USAGE.md](./USAGE.md)**：从环境安装、密钥配置到六大命令、Python 库调用、常见问题。
+
+---
+
+## 🆕 v3.0 版本更新内容
+
+本次升级围绕**性能、体验、反幻觉深度**三个方向做了核心改造：
+
+### ⚡ 性能提升
+| 优化项 | 说明 | 效果 |
+| --- | --- | --- |
+| **Analyst 章节并行分析** | `src/agent/analyst.py` 改为线程池并行（默认4线程），各章节独立调用LLM | 7章报告的分析阶段从串行→并行，提速约 60% |
+| **Writer 章节并行撰写** | `src/agent/writer.py` 各章节正文并行生成，按原始顺序组装 | 撰写阶段同步提速，整体生成等待时间大幅缩短 |
+
+### 🖥️ Web 体验升级
+| 优化项 | 说明 |
+| --- | --- |
+| **SSE 实时进度推送** | `/api/report/stream` 接口，通过 Server-Sent Events 实时推送流水线各阶段进度（规划→检索→分析→撰写→审校） |
+| **前端进度条** | 浏览器端实时显示当前执行到哪一步，不再是干等转圈 |
+| **版本标识** | 页面标题显示 v3.0，新特性提示 |
+
+### 🛡️ 反幻觉能力升级
+| 优化项 | 说明 |
+| --- | --- |
+| **引用覆盖率校验** | `src/agent/reviewer.py` 新增机械校验：统计正文中带 `[n]` 引用标注的句子比例，低于30%自动报警 |
+| **审校日志增强** | 日志输出引用覆盖率百分比，便于评估报告质量 |
+| **引用覆盖率纳入审校结论** | 覆盖率过低时作为问题项写入审校结果，触发writer修订 |
+
+> **兼容性**：全部 21 项单元测试通过，CLI 命令、离线demo、原有API均无破坏性变更。
+
+---
+
+## 它能做什么
+
+| 需求 | 实现 |
+| --- | --- |
+| **① Python + AKShare 抓 A 股数据并清洗** | `src/data`：10+ 接口（行情/财务/资金流/估值/龙虎榜/北向资金/解禁），自动重试 + 中文列名标准化 + 「亿/万/%」脏数据解析 |
+| **② 大模型投研助手 + 双层反幻觉** | `src/services` + `src/verify`：数值层交叉校验（逐条数字核对）+ 语义层 Faithfulness 校验（无来源定性判断），自动纠错重写 |
+| **③ 多智能体研报流水线** | `src/agent`：规划→递归深挖检索→分析→撰写→审校五阶段协作，支持多轮补检知识缺口 |
+| **④ 技术面量化分析** | `src/analysis/indicators.py`：MACD/RSI/KDJ/布林带自动计算，金叉死叉、超买超卖、多头/空头排列信号生成 |
+| **⑤ 产业链知识图谱** | `src/analysis/chain.py`：内置 14 条主流产业链（锂电池/半导体/光伏/医药/银行…），输入公司自动定位上下游并横向对比 |
+| **⑥ RAG 历史报告检索** | `src/rag/vector_store.py`：本地向量库 + 余弦相似度，生成报告前检索历史相似案例；支持真实 embedding API（OpenAI 兼容），未配置自动回退本地哈希向量 |
+| **⑦ 三大报表勾稽校验** | `src/verify/statements.py`：资产=负债+权益、净利润=利润总额−所得税、现金流期末勾稽、经营现金流/净利润利润质量等确定性核对 |
+| **⑧ 多公司批量对比** | `src/analysis/comparison.py` + `compare` 命令：多家公司 PE/PB/增速/ROE/技术面横向对比，按任意维度排序 |
+| **⑨ 报告导出 PDF** | `src/export/pdf_export.py`：reportlab 中文排版，标题/表格/列表多页导出，`--pdf` 一键开启 |
+| **⑩ 可视化图表** | Plotly 交互式 K线/财务趋势/PE-PB 仪表盘（`charts.py`）+ networkx 产业链关系网络图（`chain_viz.py`），均嵌入 HTML 报告 |
+| **⑪ Web 服务** | `web/app.py`：FastAPI 提供公司速览 + 深度研报生成 API，自带简易前端页面 |
+| **⑫ CLI + 离线样例 + 单元测试** | `main.py`：brief/announce/industry/compare/report/serve/demo 七个子命令；`tests/` 21 项测试零回归 |
+
+## 反幻觉是怎么做到的
+
+大模型最危险的错误是「一本正经地编造财务数字」。本项目**不依赖模型自觉**，而是用确定性校验兜底：
+
+```
+AKShare 真实数据 → 清洗 → 事实库 FactBase（唯一数字来源，输入侧锁定）
+                          │
+                          ▼
+              大模型只能依据「事实包」生成草稿
+                          │
+                          ▼
+   CrossVerifier 抽取草稿中的每个数字声明，逐条与事实库按容差比对
+                          │
+        ┌─────────────────┴─────────────────┐
+        ▼                                   ▼
+   一致 supported                    矛盾 mismatch（疑似幻觉）
+        │                                   │
+        ▼                                   ▼
+     输出成稿            回填「正确值纠错清单」→ 模型重写 → 再校验
+```
+
+实际效果（`examples/demo_cross_verification.py`）：模型把营收写成 182.30 亿、净利增速 15.20%、
+毛利率 50%，校验器精确抓出三处矛盾并给出真实值 152.30 亿 / 9.40% / 42.30%：
+
+```
+交叉校验结论：未通过｜共核对 6 处数值：一致 3、矛盾 3、无法核实 0｜疑似幻觉率 50.0%
+  [✗] 营业总收入：文本称 182.30 亿元，但经数据核算应为 152.30 亿元（2025-12-31）
+  [✗] 归母净利润同比增速：文本称 15.20%，应为 9.40%
+  [✗] 销售毛利率：文本称 50.00%，应为 42.30%
+```
+
+## 技术面 + 产业链 + RAG 三大分析能力
+
+**① 技术面量化信号**（`src/analysis/indicators.py`）
+
+基于清洗后的日线数据，自动计算四大常用技术指标并输出可解读的信号：
+
+| 指标 | 识别的信号 |
+| --- | --- |
+| MACD | 金叉（DIF 上穿 DEA，偏多）、死叉（偏空）、红绿柱 |
+| RSI(14) | >70 超买、<30 超卖 |
+| KDJ | 金叉/死叉、J 值 >100 严重超买 / <0 严重超卖 |
+| 布林带 | 突破上轨（强势乖离）、跌破下轨（弱势） |
+
+同时结合 MA5/MA20/MA60 判断均线多头/空头排列，结果写入公司速览数据包。
+
+**② 产业链知识图谱**（`src/analysis/chain.py`）
+
+内置 14 条 A 股主流产业链的上下游关系，每条按「上游原材料/核心部件 → 中游制造/品牌 → 下游应用/渠道」三层组织，列出代表公司代码与业务定位。输入公司代码即自动匹配它所在产业链及位置，并在报告中附上全景对比：
+
+```
+锂电池、新能源车、白酒、半导体、光伏、风电、
+医药、军工、银行、券商、消费电子、食品饮料、房地产、煤炭钢铁
+```
+
+**③ RAG 历史报告检索**（`src/rag/vector_store.py`）
+
+不依赖外部向量数据库，纯 numpy 实现的本地向量库（n-gram 哈希向量化 + 余弦相似度）：
+
+```
+生成新报告 → 先检索历史报告库中同行业/同主题的相关片段
+          → 作为参考背景注入 prompt（事实数字仍由事实包锁定，不引入幻觉）
+          → 本次成稿自动入库，供后续报告检索
+```
+
+## 一、安装
+
+```bash
+cd research-report-agent
+python3 -m venv .venv && source .venv/bin/activate   # 可选
+pip install -r requirements.txt                      # akshare / pandas / numpy
+
+cp .env.example .env                                 # 配置大模型密钥
+```
+
+模型走 **OpenAI 兼容协议**，在 `.env` 改两行即可切换厂商：
+
+| 厂商 | `LLM_BASE_URL` | `LLM_MODEL` 示例 |
+| --- | --- | --- |
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| 火山·豆包方舟 | `https://ark.cn-beijing.volces.com/api/v3` | 接入点 `ep-xxxx` |
+| 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
+| Kimi / 智谱 | 见 `.env.example` 注释 | `moonshot-v1-32k` / `glm-4-flash` |
+
+> 没有密钥也能体验：所有命令加 `--sample`（或 `--mode offline`）即用**离线虚构样例**跑通全流程。
+
+## 二、运行流程（CLI）
+
+```bash
+# 0) 一键离线案例：公司速览 + 反幻觉抓错演示 + 公告校验（无需密钥/网络）
+python main.py demo
+
+# 1) 公司投研速览：抓 600519 近一年行情+多期财报+资讯，大模型生成并交叉校验
+python main.py brief 600519
+python main.py brief 600519 --start 20250101 --end 20251231   # 指定区间
+python main.py brief 000000 --sample                          # 离线样例
+
+# 2) 公告要点提炼：喂公告文本，结构化提炼并与财报交叉校验
+python main.py announce --file 公告.txt --title 2025年年度业绩快报 --symbol 600519
+python main.py announce --sample                              # 用内置样例公告
+
+# 3) 行业信息汇总（板块成分聚合 + 大模型概述）
+python main.py industry 白酒
+
+# 4) 通用多智能体网页研报（规划→递归深挖检索→分析→撰写→审校）
+python main.py report 低空经济产业链分析
+python main.py report 低空经济产业链分析 --deep          # 开启递归深挖（多轮补检知识缺口）
+
+# 5) 启动 Web 服务（FastAPI，自带前端页面）
+python main.py serve                                      # 默认 http://127.0.0.1:8000
+
+# 通用参数：--mode {auto,online,offline}  --model X  --output DIR  --deep
+```
+
+产物默认输出到 `output/`，同时生成 Markdown 与自包含 HTML（含交叉校验表与事实包附录）。
+
+## 三、案例演示（`examples/`）
+
+| 脚本 | 演示内容 |
+| --- | --- |
+| `demo_a_share.py` | 公司速览全流程：数据清洗→事实锁定→生成→交叉校验→导出 |
+| `demo_cross_verification.py` | **反幻觉核心**：故意写错 3 个数字，看校验器如何抓出并纠错 |
+| `demo_announcement.py` | 公告要点提炼，并与财报数字交叉校验 |
+| `demo_offline.py` | 通用网页研报的离线流程 |
+
+运行任一案例：`python examples/demo_cross_verification.py`。
+离线样例数据由 `scripts/generate_samples.py` 可复现生成（虚构数据，不对应真实证券），
+存于 `data/samples/`，用于在无网络/未装 akshare 时演示「脏数据→清洗」。
+
+## 四、作为 Python 库调用
+
+```python
+from src.common.config import load_settings
+from src.services.research_assistant import ResearchAssistant
+from src.export.exporter import export_assistant
+
+settings = load_settings()
+assistant = ResearchAssistant(settings)
+
+# 公司速览（内部完成：AKShare 抓取→清洗→事实包→大模型→交叉校验→必要时重写）
+result = assistant.company_brief("600519")
+print(result.text)
+print(result.verification)          # supported / mismatch / unverifiable 明细
+export_assistant("贵州茅台 投研速览", result.text, verification=result.verification,
+                 fact_pack=result.fact_pack)
+
+# 公告要点
+result = assistant.extract_announcement(open("公告.txt", encoding="utf-8").read(),
+                                        title="年报", symbol="600519")
+```
+
+## 五、工程结构
+
+```
+research-report-agent/
+├── main.py                       # CLI：brief/announce/industry/compare/report/serve/demo
+├── config.example.json .env.example requirements.txt
+├── src/
+│   ├── data/                     # ① 数据层（10+ AKShare 接口）
+│   │   ├── sources.py            #   行情/财务/资金流/估值/龙虎榜/北向/解禁
+│   │   ├── cleaner.py            #   中文列名/亿万百分号/缺失值清洗 + 派生指标
+│   │   ├── data_service.py       #   实时抓取→清洗→失败回退样例（CompanyBundle）
+│   │   └── sample_data.py        #   离线样例加载
+│   ├── verify/                   # 反幻觉校验 + 三表勾稽
+│   │   ├── facts.py              #   事实库 FactBase + 事实包渲染（输入锁定）
+│   │   ├── verifier.py           #   数值声明抽取 + 逐条核对 + 纠错清单
+│   │   ├── semantic_check.py     #   语义层 Faithfulness 校验（无来源判断识别）
+│   │   └── statements.py         #   三大报表勾稽（恒等式/利润质量）
+│   ├── services/
+│   │   └── research_assistant.py #   投研助手编排 + 语义校验纠错闭环
+│   ├── llm/client.py             # OpenAI 兼容客户端 + 离线兜底
+│   ├── agent/                    # 多智能体流水线（规划/检索/分析/撰写/审校）
+│   │   └── researcher.py         #   递归深挖检索（多轮补检知识缺口）
+│   ├── analysis/                 # 技术面 + 产业链 + 多公司对比
+│   │   ├── indicators.py         #   MACD/RSI/KDJ/布林带信号
+│   │   ├── chain.py              #   14 条产业链上下游图谱
+│   │   ├── chain_viz.py          #   networkx 产业链关系图
+│   │   └── comparison.py         #   多公司横向对比与排序
+│   ├── rag/                      # RAG 向量检索
+│   │   ├── vector_store.py       #   本地向量库（余弦相似度）
+│   │   └── embedding.py          #   真实 embedding API + 本地哈希回退
+│   ├── tools/                    # 网页检索 / 抓取
+│   ├── common/                   # 配置 / 数据结构 / 日志
+│   └── export/
+│       ├── exporter.py           # Markdown / HTML / PDF 导出
+│       ├── charts.py             # Plotly K线图/财务趋势图/PE-PB 仪表盘
+│       └── pdf_export.py         # reportlab 中文 PDF 排版
+├── web/
+│   └── app.py                    # FastAPI Web 服务 + 前端页面
+├── data/samples/                 # 离线样例「原始脏数据」CSV
+├── examples/                     # 案例脚本
+├── USAGE.md                      # 完整使用教程
+├── scripts/generate_samples.py   # 样例数据可复现生成
+└── tests/                        # 21 项单元 + 端到端测试
+```
+
+## 六、数据来源（AKShare 接口）
+
+| 数据 | 接口 | 说明 |
+| --- | --- | --- |
+| 日线行情（前复权） | `stock_zh_a_hist` | 中文列名标准化、均线/波动率/区间涨跌 |
+| 财务摘要（多期） | `stock_financial_abstract_ths` | 「1.47亿/46.84%/False」→ 数值与缺失值 |
+| 个股信息 | `stock_individual_info_em` | 长表转字典，失败不阻塞主流程 |
+| 公司资讯 | `stock_news_em` | 标题/正文/时间/来源标准化 |
+| 行业成分 | `stock_board_industry_cons_em` | 板块涨跌聚合，限流时回退 |
+| **资金流向** | `stock_individual_fund_flow` | 主力/超大单/大单净流入 |
+| **估值指标** | `stock_a_indicator_lg` | PE / PB / PS / 股息率 |
+| **龙虎榜** | `stock_lhb_detail_em` | 上榜日期、买卖席位、净额 |
+| **北向资金** | `stock_hsgt_individual_em` | 个股北向持股数量与占比 |
+| **解禁数据** | `stock_restricted_release_queue_em` | 解禁日期、解禁数量、占总股本比 |
+
+> 公开数据接口存在限流/偶发断连，本项目对每个接口做有限次重试，
+> 关键数据失败时自动回退到离线样例并显著标注，保证流程不中断、不把样例冒充真实数据。
+
+## 七、运行测试
+
+```bash
+python3 -m unittest discover -s tests -v     # 21 项：清洗 / 反幻觉 / 助手 / 流水线
+```
+
+## 八、路线图
+
+- [x] 接入估值（PE/PB）、北向资金、主力资金流、龙虎榜、解禁等 AKShare 接口
+- [x] 财务图表自动可视化（Plotly K线/趋势图/PE-PB 仪表盘）
+- [x] 语义层 Faithfulness 校验（识别无来源定性判断）
+- [x] 递归深挖检索（多轮补检知识缺口）
+- [x] FastAPI 服务化与 Web 界面
+- [x] 技术面指标（MACD/RSI/KDJ/布林带）与信号生成
+- [x] 产业链知识图谱（14 条主流产业链）+ networkx 关系图可视化
+- [x] RAG 本地向量检索（历史报告复用）+ 真实 embedding API 接入
+- [x] 三大报表勾稽校验（资产负债表/利润表/现金流量表）
+- [x] 多公司批量对比与行业内排序
+- [x] 报告导出 PDF（中文排版）
+- [ ] 自动抓取三大报表原始科目（AKShare 资产负债表接口）并接入勾稽校验
+- [ ] 产业链图谱交互式探索（点击节点展开关联公司）
+- [ ] 多公司对比雷达图 / 估值分位图
+
+## 免责声明
+
+本项目仅用于技术研究与学习。AKShare 数据与 AI 生成内容可能存在错误、延迟或偏差，
+**不构成任何投资建议**；请以交易所及上市公司正式披露文件为准并自行核验。
+
+## License
+
+[MIT](LICENSE)
