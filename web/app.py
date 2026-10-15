@@ -857,190 +857,177 @@ def api_announce(text: str, symbol: str = "", title: str = "公司公告"):
 
 @app.get("/api/stats")
 def api_stats():
-    """幻觉率历史统计。"""
-    text = """# 反幻觉统计
+    """幻觉率历史统计 - 接真实数据。"""
+    from src.verify.stats import HallucinationStats
 
-## 总体情况
-
-- **已生成报告数**：本项目内置反幻觉三道防线，每次生成报告都会自动校验
-- **幻觉率计算方式**：报告里每个数字跟真实数据交叉核对，不一致就标记为幻觉
-
-## 三道防线说明
-
-1. **输入约束**：只让模型看清洗后的「事实包」，从源头减少编造
-2. **数字校验**：报告里每个数字都跟真实数据交叉核对
-3. **逻辑审校**：检查因果关系、引用覆盖率、三表勾稽
-
-## 可信度等级
-
-- **A级（<5%）**：非常可靠
-- **B级（5-15%）**：基本可靠
-- **C级（15-30%）**：需要谨慎
-- **D级（>30%）**：不可靠
-
-> 每次生成报告后，都会在报告底部显示本次的幻觉率和可信度等级。
-"""
-    return {"text": text}
+    try:
+        stats = HallucinationStats()
+        text = stats.render_markdown()
+        return {"text": text}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/sentiment")
 def api_sentiment(symbol: str):
-    """情绪面分析。"""
-    text = f"""# {symbol} 情绪面分析
+    """情绪面分析 - 接真实数据。"""
+    from src.services.research_assistant import ResearchAssistant
+    from src.analysis.sentiment import analyze_sentiment
+
+    settings = get_settings()
+    ra = ResearchAssistant(settings)
+    try:
+        # 先获取公司的新闻
+        bundle = ra.data.get_company_bundle(symbol, prefer_live=True)
+        news_list = bundle.news[:20] if bundle.news else []
+        
+        if not news_list:
+            return {"text": f"# {symbol} 情绪面分析\n\n暂无新闻数据，无法分析情绪。"}
+        
+        # 调用真实的情绪分析
+        result = analyze_sentiment(news_list, ra.llm)
+        
+        # 格式化输出
+        text = f"""# {symbol} 情绪面分析
 
 ## 新闻情绪概览
 
-| 情绪类型 | 占比 | 说明 |
-|---|---|---|
-| 正面 | 45% | 利好新闻、业绩增长、订单增加 |
-| 中性 | 40% | 日常公告、行业动态 |
-| 负面 | 15% | 风险提示、行业竞争加剧 |
+- **分析新闻数**：{len(news_list)} 篇
+- **整体情绪**：{result.get('overall', '中性')}
+- **正面占比**：{result.get('positive_ratio', 0)*100:.1f}%
+- **负面占比**：{result.get('negative_ratio', 0)*100:.1f}%
 
-## 整体情绪评分
+## 主要正面新闻
 
-**综合评分：6.5 / 10（偏正面）**
-
-### 正面因素
-- 最近 30 天内发布了 X 篇正面新闻
-- 行业整体景气度向上
-- 机构持仓稳定
-
-### 负面因素
-- 最近有 Y 篇风险提示公告
-- 竞争对手动态较多
-
-## 情绪趋势
-
-- **近 7 天**：情绪偏多，正面新闻占比上升
-- **近 30 天**：整体平稳，无明显利空
-- **近 90 天**：中性偏多
-
-> ⚠️ 情绪面分析仅供参考，不构成投资建议。
 """
-    return {"text": text}
+        for news in result.get('positive_news', [])[:5]:
+            text += f"- {news.get('title', '')}\n"
+        
+        text += "\n## 主要负面新闻\n\n"
+        for news in result.get('negative_news', [])[:5]:
+            text += f"- {news.get('title', '')}\n"
+        
+        text += "\n> ⚠️ 情绪面分析仅供参考，不构成投资建议。\n"
+        return {"text": text}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/backtest")
 def api_backtest(symbol: str, days: int = 60):
-    """回测功能。"""
-    text = f"""# {symbol} MACD 策略回测
+    """回测功能 - 接真实数据。"""
+    from src.services.research_assistant import ResearchAssistant
+    from src.analysis.backtest import backtest_macd
+
+    settings = get_settings()
+    ra = ResearchAssistant(settings)
+    try:
+        # 先获取K线数据
+        bundle = ra.data.get_company_bundle(symbol, prefer_live=True)
+        price_df = bundle.price_df
+        
+        if price_df is None or len(price_df) == 0:
+            return {"text": f"# {symbol} 回测\n\n暂无K线数据，无法回测。"}
+        
+        # 只取最近 days 天
+        price_df = price_df.tail(days)
+        
+        # 调用真实的回测
+        result = backtest_macd(price_df)
+        
+        # 格式化输出
+        text = f"""# {symbol} MACD 策略回测
 
 ## 回测设置
 
-- **回测周期**：最近 {days} 天
+- **回测周期**：最近 {len(price_df)} 天
 - **策略**：MACD 金叉买入，死叉卖出
 - **初始资金**：100,000 元
 
 ## 回测结果
 
-| 指标 | 数值 | 说明 |
-|---|---|---|
-| 总交易次数 | 8 次 | 金叉/死叉信号次数 |
-| 盈利次数 | 5 次 | 赚钱的交易 |
-| 亏损次数 | 3 次 | 亏钱的交易 |
-| 胜率 | 62.5% | 盈利交易占比 |
-| 总收益率 | +12.3% | 策略总收益 |
-| 最大回撤 | -5.8% | 最大亏损幅度 |
-| 夏普比率 | 1.2 | 风险调整后收益 |
-
-## 交易明细
-
-| 日期 | 信号 | 价格 | 盈亏 |
-|---|---|---|---|
-| 2024-01-15 | 金叉买入 | 1680 元 | - |
-| 2024-02-20 | 死叉卖出 | 1750 元 | +4.2% |
-| 2024-03-10 | 金叉买入 | 1720 元 | - |
-| 2024-04-15 | 死叉卖出 | 1680 元 | -2.3% |
-| ... | ... | ... | ... |
+| 指标 | 数值 |
+|---|---|
+| 总交易次数 | {result.get('total_trades', 0)} 次 |
+| 盈利次数 | {result.get('win_trades', 0)} 次 |
+| 亏损次数 | {result.get('lose_trades', 0)} 次 |
+| 胜率 | {result.get('win_rate', 0)*100:.1f}% |
+| 总收益率 | {result.get('total_return', 0)*100:.2f}% |
+| 最大回撤 | {result.get('max_drawdown', 0)*100:.2f}% |
 
 ## 结论
 
-**MACD 策略在这只股票上表现尚可，胜率 62.5%，但需要注意最大回撤风险。**
+{result.get('summary', '回测完成。')}
 
 > ⚠️ 历史回测不代表未来收益，仅供参考。
 """
-    return {"text": text}
+        return {"text": text}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/factor")
 def api_factor(symbol: str):
-    """因子分析。"""
-    text = f"""# {symbol} 4 因子打分
+    """因子分析 - 接真实数据。"""
+    from src.services.research_assistant import ResearchAssistant
+    from src.analysis.comparison import factor_analysis, CompanyRow
+
+    settings = get_settings()
+    ra = ResearchAssistant(settings)
+    try:
+        # 先获取公司数据
+        bundle = ra.data.get_company_bundle(symbol, prefer_live=True)
+        
+        # 构造 CompanyRow
+        row = CompanyRow(
+            symbol=bundle.symbol,
+            name=bundle.name,
+            pe=bundle.valuation.get('pe'),
+            pb=bundle.valuation.get('pb'),
+            revenue_growth=bundle.financial_summary.get('revenue_yoy'),
+            profit_growth=bundle.financial_summary.get('profit_yoy'),
+            roe=bundle.financial_summary.get('roe'),
+            gross_margin=bundle.financial_summary.get('gross_margin'),
+        )
+        
+        # 调用真实的因子分析
+        factors = factor_analysis([row])
+        
+        # 格式化输出
+        text = f"""# {symbol} 4 因子打分
 
 ## 因子得分总览
 
-| 因子 | 得分 | 排名 | 说明 |
-|---|---|---|---|
-| 估值因子 | 7.5 / 10 | 行业前 30% | PE/PB 处于合理偏低水平 |
-| 成长因子 | 8.0 / 10 | 行业前 20% | 营收/净利润增速较快 |
-| 盈利因子 | 8.5 / 10 | 行业前 15% | ROE/毛利率较高 |
-| 动量因子 | 6.0 / 10 | 行业前 50% | 近期股价表现中等 |
-
+| 因子 | 得分 | 说明 |
+|---|---|---|
+"""
+        for f in factors[0].get('factors', []):
+            text += f"| {f.get('name', '')} | {f.get('score', 0):.1f} / 10 | {f.get('comment', '')} |\n"
+        
+        text += f"""
 ## 综合评分
 
-**综合得分：7.5 / 10（行业前 25%）**
-
-### 估值因子详解
-- PE（市盈率）：合理偏低，有一定安全边际
-- PB（市净率）：合理
-- 股息率：中等水平
-
-### 成长因子详解
-- 营收增速：较快
-- 净利润增速：较快
-- 营收复合增长率：优秀
-
-### 盈利因子详解
-- ROE（净资产收益率）：较高
-- 毛利率：较高
-- 净利率：较高
-
-### 动量因子详解
-- 近 1 月涨幅：中等
-- 近 3 月涨幅：中等
-- 近 6 月涨幅：中等
+**综合得分：{factors[0].get('total_score', 0):.1f} / 10**
 
 > ⚠️ 因子打分仅供参考，不构成投资建议。
 """
-    return {"text": text}
+        return {"text": text}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/industry")
 def api_industry(name: str):
-    """行业分析。"""
-    text = f"""# {name} 行业分析
+    """行业分析 - 接真实数据。"""
+    from src.services.research_assistant import ResearchAssistant
 
-## 行业概览
-
-- **行业分类**：{name}
-- **成分股数量**：约 50 家
-- **今日涨跌**：+1.2%
-- **近 1 月涨跌**：+5.8%
-
-## 行业龙头公司
-
-| 代码 | 名称 | 今日涨跌 | 市值 |
-|---|---|---|---|
-| 600519 | 贵州茅台 | +1.5% | 2.1 万亿 |
-| 000858 | 五粮液 | +2.1% | 6800 亿 |
-| 000568 | 泸州老窖 | +0.8% | 2500 亿 |
-| ... | ... | ... | ... |
-
-## 行业景气度
-
-- **当前景气度**：中性偏多
-- **景气度趋势**：向上
-- **政策支持**：有一定政策支持
-
-## 行业风险
-
-- 竞争加剧
-- 原材料价格波动
-- 需求端不及预期
-
-> ⚠️ 行业分析仅供参考，不构成投资建议。
-"""
-    return {"text": text}
+    settings = get_settings()
+    ra = ResearchAssistant(settings)
+    try:
+        result = ra.summarize_industry(name)
+        return {"text": result.text}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/report", response_model=ReportResponse)
