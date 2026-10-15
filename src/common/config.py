@@ -74,6 +74,13 @@ def _env_list(key: str, default: List[str]) -> List[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _env_bool(key: str, default: bool) -> bool:
+    raw = os.environ.get(key)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on", "y")
+
+
 @dataclass
 class Settings:
     """运行配置。"""
@@ -101,6 +108,18 @@ class Settings:
     output_dir: str = "output"
     export_formats: List[str] = field(default_factory=lambda: ["md", "html"])
     log_level: str = "INFO"
+
+    # ---- 多数据源（DataSourceManager）----
+    # 留空 = 只用默认的 AKShare 单源；配置多个则启用容灾切换与交叉验证
+    data_sources: List[str] = field(default_factory=list)
+    cross_check_enabled: bool = True
+    auto_failover: bool = True
+    tushare_token: str = ""
+    mcp_server_url: str = ""
+    jqdata_username: str = ""
+    jqdata_password: str = ""
+    rqdata_username: str = ""
+    rqdata_password: str = ""
 
     # ---- 运行期解析 ----
     effective_mode: str = "offline"          # 经过 auto 判定后的真实模式
@@ -175,6 +194,20 @@ def load_settings(
     if os.environ.get("EXPORT_FORMATS"):
         settings.export_formats = _env_list("EXPORT_FORMATS", settings.export_formats)
     settings.log_level = _env_str("LOG_LEVEL", settings.log_level)
+
+    # ---- 多数据源配置（也支持 config.json 里的同名字段）----
+    if os.environ.get("DATA_SOURCES"):
+        settings.data_sources = _env_list("DATA_SOURCES", settings.data_sources)
+    settings.cross_check_enabled = _env_bool(
+        "CROSS_CHECK_ENABLED", settings.cross_check_enabled
+    )
+    settings.auto_failover = _env_bool("AUTO_FAILOVER", settings.auto_failover)
+    settings.tushare_token = _env_str("TUSHARE_TOKEN", settings.tushare_token)
+    settings.mcp_server_url = _env_str("MCP_SERVER_URL", settings.mcp_server_url)
+    settings.jqdata_username = _env_str("JQDATA_USERNAME", settings.jqdata_username)
+    settings.jqdata_password = _env_str("JQDATA_PASSWORD", settings.jqdata_password)
+    settings.rqdata_username = _env_str("RQDATA_USERNAME", settings.rqdata_username)
+    settings.rqdata_password = _env_str("RQDATA_PASSWORD", settings.rqdata_password)
 
     # 3) CLI 覆盖（最高优先级）
     if cli_overrides:

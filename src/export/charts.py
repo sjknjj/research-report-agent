@@ -12,7 +12,36 @@ import pandas as pd
 
 logger = logging.getLogger("export.charts")
 
-_PLOTLY_JS = None
+_PLOTLY_JS_TAG: Optional[str] = None
+
+
+def _plotly_js_tag() -> str:
+    """返回 plotly.js 的 <script> 片段，优先内联（离线可用），失败才退回 CDN。"""
+    global _PLOTLY_JS_TAG
+    if _PLOTLY_JS_TAG is None:
+        try:
+            from plotly.offline import get_plotlyjs
+
+            _PLOTLY_JS_TAG = "<script>" + get_plotlyjs() + "</script>"
+        except Exception:  # noqa: BLE001
+            logger.warning("无法内联 plotly.js，退回 CDN 版本（离线环境图表将无法显示）")
+            _PLOTLY_JS_TAG = (
+                '<script src="https://cdn.plot.ly/plotly-2.27.0.min.js" charset="utf-8"></script>'
+            )
+    return _PLOTLY_JS_TAG
+
+
+def ensure_plotly_js(chart_html: str) -> str:
+    """保证任意图表组合下 plotly.js 只注入一次。
+
+    chart_* 函数统一以 ``include_plotlyjs=False`` 产出纯 div + newPlot 脚本，
+    由这里在汇总处前置一份内联 plotly.js，避免"只有趋势图/仪表盘时图表空白"。
+    """
+    if not chart_html or "Plotly.newPlot" not in chart_html:
+        return chart_html
+    if "cdn.plot.ly" in chart_html or "plotly.js" in chart_html:
+        return chart_html
+    return _plotly_js_tag() + chart_html
 
 
 def _load_plotly():
@@ -77,7 +106,7 @@ def kline_with_volume(price_df: Optional[pd.DataFrame]) -> str:
     )
     fig.update_yaxes(title_text="价格(元)", row=1, col=1)
     fig.update_yaxes(title_text="成交量(手)", row=2, col=1)
-    return fig.to_html(full_html=False, include_plotlyjs="cdn", div_id="kline-chart")
+    return fig.to_html(full_html=False, include_plotlyjs=False, div_id="kline-chart")
 
 
 def financial_trend_chart(financial_df: Optional[pd.DataFrame]) -> str:

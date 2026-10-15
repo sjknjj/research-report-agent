@@ -1,0 +1,43 @@
+# ===== 密钥 / 环境（绝不能打进镜像）=====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+config.json
+config.yaml
+
+# ===== 版本控制 / 缓存 =====
+.git
+.gitignore
+.github
+.pytest_cache
+.ruff_cache
+.mypy_cache
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.cache
+
+# ===== 运行时产物 / 数据 =====
+cache/
+output/
+data/rag_index.json
+*.log
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+ENV/
+
+# ===== 文档 / 示例 / 编辑器 / 系统 =====
+*.md
+examples/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+启动.command

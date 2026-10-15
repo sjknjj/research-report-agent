@@ -34,6 +34,9 @@ htmlcov/
 output/*
 !output/.gitkeep
 
+# ===== 数据缓存（按天缓存真实行情，不应提交进仓库）=====
+cache/
+
 # ===== 编辑器 / 系统 =====
 .idea/
 .vscode/

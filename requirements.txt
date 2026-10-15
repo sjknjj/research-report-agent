@@ -23,9 +23,10 @@ networkx>=3.0           # 产业链图谱布局
 # ===== PDF 导出（python main.py brief ... --pdf）=====
 reportlab>=4.0
 
-# ===== Web 服务（python main.py serve）=====
-# fastapi>=0.110
-# uvicorn>=0.29
+# ===== Web 服务（python main.py serve / Dockerfile CMD）=====
+# 必需：Dockerfile 的 CMD 就是 python main.py serve，缺了容器必然启动失败
+fastapi>=0.110
+uvicorn>=0.29
 
 # ===== 可选增强 =====
 # 语义层反幻觉评估（deepeval 已安装时自动启用 faithfulness 指标）
@@ -33,5 +34,8 @@ reportlab>=4.0
 # httpx>=0.27
 # openai>=1.30
 # trafilatura>=1.8
-# pytest>=8.0
+
+# ===== 测试 =====
+# 放出来，保证全新环境可以直接跑 pytest tests/
+pytest>=8.0
 # ============================================================

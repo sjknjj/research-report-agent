@@ -7,8 +7,9 @@
     industry NAME           行业信息汇总
     compare S1 S2 ...       多公司横向对比与行业内排序（--by 指定排序维度）
     report TOPIC            通用多智能体研报（规划→检索→分析→撰写→审校）
-    serve                   启动 FastAPI Web 界面（端口 8000）
+    serve                   启动 FastAPI Web 界面（--port 指定端口，默认 8000）
     demo                    一键离线案例（含"反幻觉交叉校验"演示）
+    stats                   查看历史幻觉率统计与模型可信度排名
 
 通用参数：
     --pdf                   额外导出 PDF（需 reportlab）
@@ -58,7 +59,7 @@ from src.common.config import load_settings  # noqa: E402
 from src.common.logger import setup_logging, get_logger  # noqa: E402
 from src.data import sample_data  # noqa: E402
 from src.data.data_service import DataService  # noqa: E402
-from src.export.charts import financial_trend_chart, kline_with_volume  # noqa: E402
+from src.export.charts import financial_trend_chart, kline_with_volume, valuation_gauge  # noqa: E402
 from src.export.exporter import (  # noqa: E402
     export_assistant,
     export_report,
@@ -115,7 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_cmp.add_argument("--sample", action="store_true", help="强制使用离线样例")
 
     sub.add_parser("demo", parents=[common], help="一键离线案例 + 反幻觉演示")
-    sub.add_parser("serve", parents=[common], help="启动 FastAPI Web 界面（端口 8000）")
+    p_serve = sub.add_parser("serve", parents=[common], help="启动 FastAPI Web 界面（--port 指定端口，默认 8000）")
+    p_serve.add_argument("--port", type=int, default=8000, help="监听端口，默认 8000")
 
     p_daily = sub.add_parser("daily", parents=[common], help="自选股批量跑 + 推送（配合 GitHub Actions 定时）")
     p_daily.add_argument("--file", default="watchlist.txt", help="自选股列表文件路径")
@@ -130,6 +132,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_mon.add_argument("--threshold", type=float, default=5.0, help="涨跌幅阈值百分比（默认5%%）")
     p_mon.add_argument("--interval", type=int, default=60, help="轮询间隔秒数（默认60秒）")
     p_mon.add_argument("--push", action="store_true", default=True, help="触发时推送通知")
+
+    # 3.5：历史幻觉率统计（cmd_stats 早已实现，此前漏注册导致命令不可用）
+    sub.add_parser("stats", parents=[common], help="查看历史幻觉率统计与模型可信度排名")
     return parser
 
 
@@ -156,6 +161,19 @@ def _formats(settings, args):
     return fmts
 
 
+def _export(title: str, body: str, settings, args, **kwargs):
+    """调用 export_assistant；PDF 失败时明确提示，但不丢掉已生成的其它文件。"""
+    from src.export.pdf_export import PdfExportError
+    try:
+        return export_assistant(
+            title, body, settings.output_dir, _formats(settings, args), **kwargs
+        )
+    except PdfExportError as exc:
+        print(_color(f"⚠️ PDF 导出失败：{exc}", _C.YELLOW), file=sys.stderr)
+        print(_color("   （Markdown / HTML 已生成，报告正文不受影响）", _C.DIM), file=sys.stderr)
+        return list(getattr(exc, "written", []))
+
+
 # ---------------------------------------------------------------------------
 def cmd_brief(args) -> int:
     logger = get_logger("cli.brief")
@@ -173,14 +191,20 @@ def cmd_brief(args) -> int:
     chart_html = ""
     raw = result.raw_bundle
     if raw is not None and raw.price_clean is not None:
-        chart_html = kline_with_volume(raw.price_clean)
+        chart_html = kline_with_volume(raw.price_clean) or ""
     if raw is not None and raw.financial_clean is not None:
         fin_chart = financial_trend_chart(raw.financial_clean)
         if fin_chart:
             chart_html = (chart_html or "") + fin_chart
+    if raw is not None:
+        # PE/PB 估值仪表盘（此前定义了却没有调用点）
+        _val = getattr(raw, "valuation", None) or {}
+        gauge = valuation_gauge(_val.get("pe"), _val.get("pb"))
+        if gauge:
+            chart_html = (chart_html or "") + gauge
 
-    files = export_assistant(
-        title, result.text, settings.output_dir, _formats(settings, args),
+    files = _export(
+        title, result.text, settings, args,
         verification=result.verification, fact_pack=result.fact_pack, meta_lines=meta,
         chart_html=chart_html, extra_html=result.extra.get("chain_graph", ""),
     )
@@ -242,9 +266,9 @@ def cmd_announce(args) -> int:
     meta = [f"模式：{settings.effective_mode}"]
     if result.verification:
         meta.append("已与财报交叉校验")
-    files = export_assistant(
-        f"公告要点：{args.title}", result.text, settings.output_dir,
-        _formats(settings, args), verification=result.verification, meta_lines=meta,
+    files = _export(
+        f"公告要点：{args.title}", result.text, settings, args,
+        verification=result.verification, meta_lines=meta,
     )
     print("\n" + "=" * 64)
     print("公告要点提炼完成")
@@ -264,8 +288,8 @@ def cmd_industry(args) -> int:
     ra = ResearchAssistant(settings)
     result = ra.summarize_industry(name)
     stats = result.extra.get("stats", {})
-    files = export_assistant(
-        f"{name} 行业汇总", result.text, settings.output_dir, _formats(settings, args),
+    files = _export(
+        f"{name} 行业汇总", result.text, settings, args,
         meta_lines=[f"成分股：{stats.get('count', '-')} 家", f"模式：{settings.effective_mode}"],
     )
     print("\n" + "=" * 64)
@@ -320,9 +344,9 @@ def cmd_demo(args) -> int:
     av = ann.verification or {}
     print(f"[公告交叉校验] 一致 {av.get('supported')}、矛盾 {av.get('mismatch')}")
 
-    files = export_assistant(
-        "演示样本公司 投研速览（案例）", result.text, settings.output_dir,
-        _formats(settings, args), verification=result.verification, fact_pack=result.fact_pack,
+    files = _export(
+        "演示样本公司 投研速览（案例）", result.text, settings, args,
+        verification=result.verification, fact_pack=result.fact_pack,
         meta_lines=["离线案例", "数据为虚构样例"],
     )
     print("\n案例产物：")
@@ -334,16 +358,20 @@ def cmd_demo(args) -> int:
 def cmd_compare(args) -> int:
     settings = _settings(args)
     from src.analysis.comparison import ComparisonService
-    from src.export.exporter import export_assistant
+
+    # 兼容两种写法：`compare 600519 000858`（空格）与 `compare 600519,000858`（逗号）
+    symbols = [s.strip() for token in args.symbols for s in str(token).split(",") if s.strip()]
+    if len(symbols) < 2:
+        print("至少需要 2 个股票代码，例如：python main.py compare 600519 000858")
+        return 1
 
     prefer_live = (not args.sample) and settings.effective_mode != "offline"
     svc = ComparisonService()
-    rows = svc.compare(args.symbols, prefer_live=prefer_live)
+    rows = svc.compare(symbols, prefer_live=prefer_live)
     md = svc.render_markdown(rows, by=args.by)
 
-    formats = _formats(settings, args)
-    files = export_assistant(
-        f"多公司对比_{len(rows)}家", md, settings.output_dir, formats,
+    files = _export(
+        f"多公司对比_{len(rows)}家", md, settings, args,
         meta_lines=[f"排序维度：{args.by}", f"模式：{settings.effective_mode}"],
     )
     print("\n" + "=" * 64)
@@ -356,15 +384,17 @@ def cmd_compare(args) -> int:
 
 def cmd_serve(args) -> int:
     """启动 FastAPI Web 界面。"""
-    settings = _settings(args)
+    # 应用 CLI 覆盖项（含日志级别）；此处不需要 settings 变量本身
+    _settings(args)
     try:
         import uvicorn
     except ImportError:
         print("请先安装：pip install fastapi uvicorn")
         return 1
     from web.app import app
-    print("启动 Web 服务：http://localhost:8000 （Ctrl+C 退出）")
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    port = getattr(args, "port", 8000) or 8000
+    print(f"启动 Web 服务：http://localhost:{port} （Ctrl+C 退出）")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
     return 0
 
 
@@ -475,7 +505,8 @@ def cmd_stats(args) -> int:
 def cmd_monitor(args) -> int:
     """盘中实时监控自选股涨跌，涨跌幅超过阈值时推送通知。"""
     import time
-    settings = _settings(args)
+    # 应用 CLI 覆盖项（含日志级别）；监控循环本身不需要 settings 变量
+    _settings(args)
 
     # 读取自选股列表
     watchlist_file = Path(args.file)
@@ -496,10 +527,8 @@ def cmd_monitor(args) -> int:
     print(_color(f"开始监控 {len(symbols)} 只自选股（阈值 ±{args.threshold}%，间隔 {args.interval} 秒）", _C.BOLD, _C.CYAN))
     print("=" * 64)
 
-    from src.data.sources import AKShareSource
     from src.notify import push_brief_result
 
-    source = AKShareSource()
     alerted = set()  # 已经触发过的，避免重复推送
 
     try:
