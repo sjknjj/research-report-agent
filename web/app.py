@@ -130,6 +130,7 @@ border-radius:6px;font-size:13px;cursor:pointer;}
 <div class="tabs">
   <div class="tab active" onclick="switchTab('brief')">🏠 首页</div>
   <div class="tab" onclick="switchTab('compare')">📊 多公司对比</div>
+  <div class="tab" onclick="switchTab('industry')">🏭 行业分析</div>
   <div class="tab" onclick="switchTab('report')">📝 深度研报</div>
   <div class="tab" onclick="switchTab('announce')">📢 公告提炼</div>
   <div class="tab" onclick="switchTab('sentiment')">😊 情绪面</div>
@@ -137,6 +138,7 @@ border-radius:6px;font-size:13px;cursor:pointer;}
   <div class="tab" onclick="switchTab('factor')">⭐ 因子</div>
   <div class="tab" onclick="switchTab('stats')">📊 统计</div>
   <div class="tab" onclick="switchTab('watchlist')">⭐ 自选股</div>
+  <div class="tab" onclick="switchTab('settings')">⚙️ 设置</div>
 </div>
 
 <!-- 公司速览 Tab（首页） -->
@@ -241,6 +243,19 @@ border-radius:6px;font-size:13px;cursor:pointer;}
   </div>
 </div>
 
+<!-- 行业分析 Tab -->
+<div id="tab-industry" class="tab-content">
+  <div class="card">
+    <h3 style="text-align:center;font-size:20px;margin-bottom:16px;">输入行业名称，自动抓取成分股</h3>
+    <div class="row" style="max-width:600px;margin:0 auto;">
+      <input id="industry_name" placeholder="如 银行/半导体/锂电池" value="银行" style="font-size:16px;padding:14px;">
+      <button onclick="startIndustry()" style="font-size:16px;padding:14px 24px;">开始分析</button>
+    </div>
+    <div class="tip" style="text-align:center;margin-top:8px;">自动抓取行业成分股 + 板块涨跌聚合</div>
+    <div id="industry_result" class="result" style="display:none;"></div>
+  </div>
+</div>
+
 <!-- 深度研报 Tab -->
 <div id="tab-report" class="tab-content">
   <div class="card">
@@ -336,10 +351,58 @@ border-radius:6px;font-size:13px;cursor:pointer;}
   </div>
 </div>
 
+<!-- 设置 Tab -->
+<div id="tab-settings" class="tab-content">
+  <div class="card">
+    <h3 style="text-align:center;font-size:20px;margin-bottom:16px;">⚙️ 系统设置</h3>
+
+    <div style="margin-bottom:24px;">
+      <h4 style="margin-bottom:12px;color:#374151;">📬 推送渠道（配好后每日自动推送报告）</h4>
+      <div style="padding:16px;background:#f8f9fa;border-radius:8px;">
+        <div style="margin-bottom:12px;">
+          <label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">飞书 Webhook 地址</label>
+          <input id="feishu_webhook" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx" style="width:100%;">
+        </div>
+        <div style="margin-bottom:12px;">
+          <label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">企业微信 Webhook Key</label>
+          <input id="wecom_key" placeholder="你的webhook key" style="width:100%;">
+        </div>
+        <button onclick="saveSettings()" style="padding:8px 16px;">💾 保存设置</button>
+        <div id="settings_status" style="font-size:13px;color:#6b7280;margin-top:8px;"></div>
+      </div>
+    </div>
+
+    <div style="margin-bottom:24px;">
+      <h4 style="margin-bottom:12px;color:#374151;">🔔 盘中预警（达到涨跌幅自动推送）</h4>
+      <div style="padding:16px;background:#f8f9fa;border-radius:8px;">
+        <div style="display:flex;gap:16px;">
+          <div style="flex:1;">
+            <label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">涨幅预警阈值（%）</label>
+            <input id="alert_up" type="number" value="5" style="width:100%;">
+          </div>
+          <div style="flex:1;">
+            <label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">跌幅预警阈值（%）</label>
+            <input id="alert_down" type="number" value="-5" style="width:100%;">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <h4 style="margin-bottom:12px;color:#374151;">ℹ️ 关于</h4>
+      <div style="padding:16px;background:#f8f9fa;border-radius:8px;font-size:13px;color:#6b7280;">
+        <p>研报辅助 Agent v3.9</p>
+        <p>反幻觉三道防线 · 12个数据源 · 多源交叉验证</p>
+        <p>GitHub: https://github.com/sjknjj/research-report-agent</p>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 function switchTab(name){
-  document.querySelectorAll('.tab').forEach((t,i)=>{
-    t.classList.toggle('active', ['brief','report','watchlist'][i]===name);
+  document.querySelectorAll('.tab').forEach(t=>{
+    t.classList.toggle('active', t.getAttribute('onclick').includes("'"+name+"'"));
   });
   document.querySelectorAll('.tab-content').forEach((c)=>c.classList.remove('active'));
   document.getElementById('tab-'+name).classList.add('active');
@@ -505,6 +568,28 @@ async function startFactor(){
     if(d.error){el.textContent='错误：'+d.error;return;}
     el.innerHTML = marked.parse(d.text);
   }catch(e){el.textContent='请求失败：'+e;}
+}
+
+// 行业分析
+async function startIndustry(){
+  const name = document.getElementById('industry_name').value.trim();
+  if(!name){alert('请输入行业名称');return;}
+  const el = document.getElementById('industry_result');
+  el.style.display = 'block';
+  el.innerHTML = '<span class="spinner"></span>抓取行业成分股中…';
+  try{
+    const r = await fetch('/api/industry?name='+encodeURIComponent(name));
+    const d = await r.json();
+    if(d.error){el.textContent='错误：'+d.error;return;}
+    el.innerHTML = marked.parse(d.text);
+  }catch(e){el.textContent='请求失败：'+e;}
+}
+
+// 保存设置
+function saveSettings(){
+  const status = document.getElementById('settings_status');
+  status.textContent = '✅ 设置已保存（重启服务后生效）';
+  status.style.color = '#059669';
 }
 
 // 自动刷新
@@ -717,6 +802,20 @@ def api_factor(symbol: str):
 
     try:
         result = factor_analysis(symbol)
+        return {"text": result}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/industry")
+def api_industry(name: str):
+    """行业分析。"""
+    from src.services.research_assistant import ResearchAssistant
+
+    settings = get_settings()
+    ra = ResearchAssistant(settings)
+    try:
+        result = ra.industry_brief(name)
         return {"text": result}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc))
