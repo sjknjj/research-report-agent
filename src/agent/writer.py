@@ -6,12 +6,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List
 
 from ..common.schema import (
+    AUTO_SECTION_HEADINGS,
     AgentContext,
     AnalysisNote,
     Reference,
     ReportSection,
     ResearchReport,
 )
+from ..verify.citation import check_citations
 from .base import BaseAgent
 
 _SECTION_SYSTEM = (
@@ -75,6 +77,10 @@ class WriterAgent(BaseAgent):
             # 3.0：在正文最后追加「多空对照」章节（来自辩论结果）
             sections.append(self._render_debate_section(ctx.debate))
 
+        # U5：先跑「引用溯源校验」并登记到 ctx，再渲染反幻觉总览，
+        # 保证总览里这条检查的状态来自本轮真实执行结果。
+        citation = self._run_citation_check(ctx, sections)
+
         # 3.5：在报告最后加「反幻觉总览」章节（由真实执行过的校验驱动）
         sections.append(self.render_anti_hallucination(ctx))
 
@@ -97,9 +103,75 @@ class WriterAgent(BaseAgent):
                 "source_count": len(ctx.search_results),
                 "revised": bool(extra_instruction),
                 "debate_score": ctx.debate.score if ctx.debate else None,
+                "citation": citation,
                 "checks": {k: v.to_dict() for k, v in ctx.checks.items()},
             },
         )
+
+    # -- U5：引用溯源校验 ----------------------------------------------------
+    @staticmethod
+    def _body_text(sections: List[ReportSection]) -> str:
+        """只取「正文章节」文本，排除速览仪表盘/多空对照/反幻觉总览等自动生成章节。"""
+        return "\n".join(
+            s.content for s in sections
+            if s.heading not in AUTO_SECTION_HEADINGS and (s.content or "").strip()
+        )
+
+    def _run_citation_check(self, ctx: AgentContext, sections: List[ReportSection]) -> dict:
+        """校验正文数字能否在它自己引用的检索资料中找到，并登记到 ctx。
+
+        sources 的编号必须与 ``report.references`` 完全一致：
+        writer 就是按 ``enumerate(ctx.search_results, start=1)`` 建 Reference 的，
+        这里保持同一编号口径，否则会把“引用错位”误报成“编造数据”。
+        """
+        sources = [
+            {
+                "index": i,
+                "title": r.title,
+                "url": r.url,
+                "snippet": r.snippet,
+                "content": r.fetched_content,
+            }
+            for i, r in enumerate(ctx.search_results, start=1)
+        ]
+        rep = check_citations(self._body_text(sections), sources)
+
+        # check_citations 会把 snippet 也算作“可校验正文”，但检索摘要只是搜索引擎的
+        # 转述、未必含原文数字。为了不过度声称，只有真正抓到网页正文（fetched_content）
+        # 时才判定为“已执行”；否则如实标注未执行（离线 mock 资料即属此类）。
+        if rep.checked and not any(
+            (r.fetched_content or "").strip() for r in ctx.search_results
+        ):
+            rep.checked = False
+            rep.message = "检索资料没有正文内容（只有标题/链接），无法做引用溯源"
+
+        if rep.checked:
+            ctx.mark_check(
+                "citation_grounding",
+                "引用溯源校验（数字能否在引用来源中找到）",
+                executed=True,
+                passed=None,  # 信息性检查：给出覆盖率与可疑数字，不单独决定通过与否
+                detail=(
+                    f"覆盖率 {rep.coverage:.0%}（{rep.grounded}/{rep.total_numbers} 个数字"
+                    f"可在引用来源中找到），疑似对不上 {len(rep.ungrounded)} 个，"
+                    f"无引用标注 {rep.uncited} 个；覆盖 {rep.sources_count} 条来源"
+                ),
+            )
+            ctx.log(
+                f"[writer] 引用溯源校验：覆盖率 {rep.coverage:.0%}，"
+                f"疑似对不上 {len(rep.ungrounded)} 个数字"
+            )
+        else:
+            # 离线 mock 资料没有正文，如实标注“未执行”，不得声称已启用。
+            ctx.mark_check(
+                "citation_grounding",
+                "引用溯源校验（数字能否在引用来源中找到）",
+                executed=False,
+                detail="校验报告正文中的财务数字能否在其引用的检索资料中找到。",
+                reason=f"未执行：{rep.message}",
+            )
+            ctx.log(f"[writer] 引用溯源校验未执行：{rep.message}")
+        return rep.to_dict()
 
     @staticmethod
     def _render_debate_section(debate) -> ReportSection:
@@ -115,10 +187,17 @@ class WriterAgent(BaseAgent):
             lines.append(f"| 论点 {i+1} | {bull} | {bear} |")
 
         content = "\n".join(lines) + "\n\n"
+        # A3：两轮互相反驳都要渲染，并显式标明轮次，避免读者误以为只有一轮。
         if debate.bull_rebuttal:
-            content += f"**多方反驳（针对空方）**：{debate.bull_rebuttal}\n\n"
+            content += f"**第 1 轮 · 多方反驳（针对空方）**：{debate.bull_rebuttal}\n\n"
         if debate.bear_rebuttal:
-            content += f"**空方反驳（针对多方）**：{debate.bear_rebuttal}\n\n"
+            content += f"**第 1 轮 · 空方反驳（针对多方）**：{debate.bear_rebuttal}\n\n"
+        bull_r2 = getattr(debate, "bull_rebuttal_round2", "")
+        bear_r2 = getattr(debate, "bear_rebuttal_round2", "")
+        if bull_r2:
+            content += f"**第 2 轮 · 多方再反驳（针对空方第 1 轮反驳）**：{bull_r2}\n\n"
+        if bear_r2:
+            content += f"**第 2 轮 · 空方再反驳（针对多方第 1 轮反驳）**：{bear_r2}\n\n"
         if debate.synthesis:
             content += f"**综合判断**：{debate.synthesis}\n\n"
         content += f"**多空评分**：{debate.score}/10（5为中性）"
@@ -204,6 +283,16 @@ class WriterAgent(BaseAgent):
                 ctx.mark_check(
                     key, name, executed=False, detail=description, reason=reason
                 )
+        # U5：引用溯源校验是主题研报下**真实可用**的防线，必须始终出现在总览中。
+        # 若本轮尚未运行（例如直接渲染总览），如实登记为“未执行”，不得声称已启用。
+        if "citation_grounding" not in ctx.checks:
+            ctx.mark_check(
+                "citation_grounding",
+                "引用溯源校验（数字能否在引用来源中找到）",
+                executed=False,
+                detail="校验报告正文中的财务数字能否在其引用的检索资料中找到。",
+                reason="未执行：本轮未运行引用溯源校验。",
+            )
 
     def render_anti_hallucination(self, ctx: AgentContext) -> ReportSection:
         """3.5：报告结尾的反幻觉总览——只依据 ctx 中真实执行过的校验。"""

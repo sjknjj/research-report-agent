@@ -88,8 +88,13 @@ class DebateResult:
 
     bull_points: List[str] = field(default_factory=list)     # 乐观论点
     bear_points: List[str] = field(default_factory=list)      # 谨慎/利空论点
-    bull_rebuttal: str = ""      # 多方反驳空方
-    bear_rebuttal: str = ""      # 空方反驳多方
+    bull_rebuttal: str = ""      # 第 1 轮：多方反驳空方论点
+    bear_rebuttal: str = ""      # 第 1 轮：空方反驳多方论点
+    # 第 2 轮（A3 补齐 README 承诺的“两轮互相反驳”）；用显式字段而非动态属性，
+    # 否则 to_dict / 序列化时会静默丢字段。
+    bull_rebuttal_round2: str = ""  # 第 2 轮：多方再反驳空方的第 1 轮反驳
+    bear_rebuttal_round2: str = ""  # 第 2 轮：空方再反驳多方的第 1 轮反驳
+    debate_rounds: int = 1       # 本轮实际执行的反驳轮数（1 或 2）
     synthesis: str = ""          # 综合平衡观点
     score: int = 0               # 多空评分（0=极度看空，10=极度看多，5=中性）
 

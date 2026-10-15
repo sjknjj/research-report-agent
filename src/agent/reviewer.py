@@ -163,9 +163,12 @@ class ReviewerAgent(BaseAgent):
 
     def _llm_review(self, ctx: AgentContext, report: ResearchReport) -> ReviewResult:
         markdown = self._render_for_review(report)
+        # U5：把引用溯源校验中“疑似对不上”的数字作为提示补充给审校模型（非阻断，
+        # 只供 LLM 参考；即使为空也不影响审校结论）。
+        hint = self._citation_hint(report)
         messages = [
             self._system(_SYSTEM_PROMPT),
-            self._user(f"报告内容如下：\n\n{markdown}\n\n请输出审校 JSON。"),
+            self._user(f"报告内容如下：\n\n{markdown}\n\n{hint}请输出审校 JSON。"),
         ]
         data = self._safe_chat_json(
             messages,
@@ -182,6 +185,24 @@ class ReviewerAgent(BaseAgent):
             issues=self._to_str_list(data.get("issues")),
             suggestions=self._to_str_list(data.get("suggestions")),
         )
+
+    @staticmethod
+    def _citation_hint(report: ResearchReport) -> str:
+        """U5：把引用溯源校验中疑似对不上的数字整理成审校提示（非阻断）。"""
+        info = (report.meta or {}).get("citation") or {}
+        ungrounded = info.get("ungrounded") or []
+        if not info.get("checked") or not ungrounded:
+            return ""
+        lines = [
+            "【引用溯源提示（自动校验，非阻断）】"
+            "以下数字未能在其标注的引用资料中找到，请重点核对是否编造或引用错位："
+        ]
+        for item in ungrounded[:10]:
+            lines.append(
+                f"- 数字 {item.get('number')}（引用 {item.get('citation')}）："
+                f"{item.get('snippet', '')}"
+            )
+        return "\n".join(lines) + "\n\n"
 
     @staticmethod
     def _render_for_review(report: ResearchReport) -> str:

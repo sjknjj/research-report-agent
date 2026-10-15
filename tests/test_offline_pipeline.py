@@ -68,19 +68,96 @@ class OfflinePipelineTest(unittest.TestCase):
         # schema 声明的两个反驳字段必须被使用
         self.assertTrue(debate.bull_rebuttal)
         self.assertTrue(debate.bear_rebuttal)
+        # A3：第二轮反驳必须有独立字段（不得再用动态属性）
+        self.assertTrue(debate.bull_rebuttal_round2)
+        self.assertTrue(debate.bear_rebuttal_round2)
+        self.assertEqual(debate.debate_rounds, 2)
         # to_dict 不能丢字段
         data = debate.to_dict()
         self.assertIn("bear_points", data)
         self.assertIn("bull_rebuttal", data)
         self.assertIn("bear_rebuttal", data)
+        self.assertIn("bull_rebuttal_round2", data)
+        self.assertIn("bear_rebuttal_round2", data)
 
         md = build_markdown(report)
         # 空方内容出现在速览仪表盘与多空对照里
         self.assertIn("离线模式：风险观点占位", md)
         self.assertNotIn("**主要风险（空方）**：\n- —", md)
         self.assertIn("空方反驳（针对多方）", md)
+        # A3：多空对照必须同时渲染第 1 轮与第 2 轮反驳
+        self.assertIn("第 1 轮", md)
+        self.assertIn("第 2 轮", md)
+        self.assertIn("多方再反驳", md)
+        self.assertIn("空方再反驳", md)
         # 多空对照表里不应再出现整列 "—"
         self.assertNotIn("| 论点 1 | 离线模式：乐观观点占位 | — |", md)
+
+    def test_debate_rounds_config_can_be_one(self):
+        """A3：debate_rounds 配成 1 时只跑第 1 轮反驳。"""
+        settings = load_settings(
+            cli_overrides={"mode": "offline", "search_provider": "mock"}
+        )
+        settings.debate_rounds = 1
+        report = ResearchOrchestrator(settings).run(self.topic)
+        md = build_markdown(report)
+        self.assertIn("第 1 轮", md)
+        self.assertNotIn("第 2 轮", md)
+
+    # -- U5：引用溯源校验接入深度研报 --------------------------------------
+    def test_citation_grounding_runs_when_sources_have_body(self):
+        """资料来源带正文时，引用溯源校验必须真实执行并给出覆盖率。"""
+        from src.agent.writer import WriterAgent
+        from src.common.schema import SearchResult
+
+        settings = load_settings(cli_overrides={"mode": "offline"})
+        agent = WriterAgent(LLMClient(settings), settings)
+        ctx = AgentContext(
+            topic="测试",
+            search_results=[
+                SearchResult(
+                    title="示例资料",
+                    url="https://example.com/1",
+                    snippet="",
+                    fetched_content="该公司 2024 年营收 152.3 亿元，同比增长 20%。",
+                )
+            ],
+        )
+        sections = [
+            ReportSection(
+                heading="经营分析",
+                content="公司营收 152.3 亿元[1]，增速 99.9%[1]。",
+                citations=[1],
+            )
+        ]
+        info = agent._run_citation_check(ctx, sections)
+
+        self.assertTrue(info["checked"])
+        self.assertTrue(ctx.checks["citation_grounding"].executed)
+        # 152.3 能在来源中找到；99.9 找不到 → 计入疑似对不上
+        self.assertGreaterEqual(info["grounded"], 1)
+        self.assertTrue(
+            any("99.9" in str(item["number"]) for item in info["ungrounded"])
+        )
+
+    def test_citation_grounding_honest_when_sources_have_no_body(self):
+        """离线 mock 资料没有正文：必须如实标注“未执行”，不得声称已启用。"""
+        report, ctx = self._run_with_ctx()
+        check = ctx.checks.get("citation_grounding")
+        self.assertIsNotNone(check)
+        self.assertFalse(check.executed)
+        self.assertIn("未执行", check.reason)
+
+        # 结果写入 report.meta["citation"]
+        info = report.meta.get("citation")
+        self.assertIsNotNone(info)
+        self.assertFalse(info["checked"])
+        self.assertEqual(info["total_numbers"], 0)
+
+        md = build_markdown(report)
+        # 「反幻觉总览」必须出现这一行，且状态为“未启用 + 原因”
+        self.assertIn("引用溯源校验", md)
+        self.assertIn("未启用", md)
 
     # -- 第 18 条：反幻觉总览必须诚实 --------------------------------------
     def test_anti_hallucination_overview_is_honest(self):
