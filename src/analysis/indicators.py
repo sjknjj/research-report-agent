@@ -94,6 +94,11 @@ def analyze_technicals(price_df: pd.DataFrame) -> dict:
     elif ma5 < ma20 and (ma60 is None or ma20 < ma60):
         trend = "空头排列（短期均线向下）"
 
+    # 3.4：K线形态识别
+    patterns = _detect_candlestick_patterns(price_df, last)
+    if patterns:
+        signals.extend(patterns)
+
     return {
         "trend": trend,
         "signals": signals,
@@ -112,3 +117,53 @@ def analyze_technicals(price_df: pd.DataFrame) -> dict:
                "ma60": round(float(ma60), 2) if ma60 else None},
         "close": round(float(price_now), 2),
     }
+
+
+def _detect_candlestick_patterns(price_df: pd.DataFrame, last: int) -> list:
+    """3.4：简单 K 线形态识别（十字星/大阳大阴/双底双顶）。"""
+    patterns = []
+    if last < 5:
+        return patterns
+
+    open_ = price_df["open"] if "open" in price_df else price_df["close"]
+    close = price_df["close"]
+    high = price_df["high"] if "high" in price_df else close
+    low = price_df["low"] if "low" in price_df else close
+
+    # 1. 十字星（开盘≈收盘，振幅不大）
+    body = abs(close.iloc[last] - open_.iloc[last])
+    range_ = high.iloc[last] - low.iloc[last]
+    if range_ > 0 and body / range_ < 0.1 and range_ / close.iloc[last] > 0.01:
+        patterns.append("十字星形态（多空分歧，可能变盘）")
+
+    # 2. 大阳线/大阴线
+    pct = (close.iloc[last] - open_.iloc[last]) / open_.iloc[last] * 100
+    if pct > 3:
+        patterns.append(f"大阳线（涨幅 {pct:.1f}%，多头强势）")
+    elif pct < -3:
+        patterns.append(f"大阴线（跌幅 {abs(pct):.1f}%，空头强势）")
+
+    # 3. 双底（W底）— 最近 20 天内有两个相近的低点
+    if last >= 20:
+        recent_low = low.iloc[last-20:last]
+        min1 = recent_low.min()
+        min1_idx = recent_low.idxmin()
+        # 找第二个低点（在第一个低点之后）
+        after_first = low.iloc[last-20:last][min1_idx:]
+        if len(after_first) > 3:
+            min2 = after_first.min()
+            if abs(min1 - min2) / min1 < 0.03 and min2 > min1 * 0.98:
+                patterns.append("疑似双底（W底）形态，可能见底反转")
+
+    # 4. 双顶（M头）— 最近 20 天内有两个相近的高点
+    if last >= 20:
+        recent_high = high.iloc[last-20:last]
+        max1 = recent_high.max()
+        max1_idx = recent_high.idxmax()
+        after_first = high.iloc[last-20:last][max1_idx:]
+        if len(after_first) > 3:
+            max2 = after_first.max()
+            if abs(max1 - max2) / max1 < 0.03 and max2 < max1 * 1.02:
+                patterns.append("疑似双顶（M头）形态，可能见顶回落")
+
+    return patterns

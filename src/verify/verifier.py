@@ -118,9 +118,23 @@ class VerificationReport:
     def passed(self) -> bool:
         return self.n_mismatch == 0
 
+    @property
+    def confidence_level(self) -> str:
+        """3.4新增：可信度等级（A=高可信 / B=中可信 / C=低可信 / D=不可信）。"""
+        rate = self.hallucination_rate
+        if rate < 0.05:
+            return "A（高可信）"
+        elif rate < 0.15:
+            return "B（中可信）"
+        elif rate < 0.30:
+            return "C（低可信）"
+        else:
+            return "D（不可信）"
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "passed": self.passed,
+            "confidence_level": self.confidence_level,
             "total_claims": len(self.claims),
             "supported": self.n_supported,
             "mismatch": self.n_mismatch,
@@ -134,6 +148,7 @@ class VerificationReport:
     def render_text(self) -> str:
         lines = [
             f"交叉校验结论：{'通过' if self.passed else '未通过'}｜"
+            f"可信度：{self.confidence_level}｜"
             f"共核对 {len(self.claims)} 处数值：一致 {self.n_supported}、"
             f"矛盾 {self.n_mismatch}、无法核实 {self.n_unverifiable}｜"
             f"疑似幻觉率 {self.hallucination_rate:.1%}",

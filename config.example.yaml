@@ -38,8 +38,24 @@ monitor:
   threshold: 5.0                          # 涨跌幅阈值（%）
   interval: 60                            # 轮询间隔（秒）
 
+# ===== 反幻觉校验配置（核心特色）=====
+verification:
+  enabled: true                           # 是否启用数字交叉校验
+  strict_mode: false                      # 严格模式：发现矛盾直接拒绝输出
+  hallucination_threshold: 0.1            # 幻觉率超过10%标记为不合格
+  auto_correct: true                      # 发现错误自动让模型重写
+
+# ===== 分析维度配置（自定义你关心的指标）=====
+analysis:
+  include_technicals: true                # 技术面分析（MA/RSI/MACD）
+  include_fundamentals: true             # 基本面分析（财务/估值）
+  include_news: true                      # 资讯舆情分析
+  include_industry_chain: true           # 产业链上下游分析
+  include_candlestick_patterns: true      # K线形态识别（头肩顶/双底等）
+
 # ===== 高级选项 =====
 advanced:
   deep_search_rounds: 2                   # 深挖模式下的补充检索轮数
   max_review_rounds: 1                    # 报告审校最大轮数
   cache_enabled: true                     # 是否启用当天数据缓存
+  debate_mode: "three_way"                # 辩论模式：two_way（多空）/ three_way（技术/基本面/情绪）
