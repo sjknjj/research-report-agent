@@ -579,4 +579,153 @@ A：启动 Web 服务后，`POST /mcp` 可被 Claude Desktop / Cursor 直接接�
 
 ---
 
+## 九、配置文件详解
+
+本项目有两个配置文件：
+- `.env`：环境变量（密钥、token 等）
+- `config.yaml`：功能配置（数据源、模型参数等）
+
+### 9.1 .env 文件详解
+
+```bash
+# ===== 大模型配置（必填）=====
+LLM_BASE_URL=https://api.deepseek.com/v1    # 大模型 API 地址
+LLM_API_KEY=sk-你的key                       # 大模型 API 密钥
+LLM_MODEL=deepseek-chat                      # 模型名称
+
+# ===== 推送配置（可选）=====
+# 飞书自定义机器人
+FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx
+FEISHU_SECRET=你的签名密钥（可选）
+
+# 企业微信机器人
+WECOM_WEBHOOK_KEY=你的webhook key
+
+# Telegram Bot
+TELEGRAM_BOT_TOKEN=你的bot token
+TELEGRAM_CHAT_ID=你的chat id
+
+# ===== 付费数据源配置（可选）=====
+# Tushare
+TUSHARE_TOKEN=你的tushare token
+
+# 聚宽 JQData
+JQDATA_USERNAME=你的聚宽账号
+JQDATA_PASSWORD=你的聚宽密码
+
+# 米筐 RiceQuant
+RQDATA_USERNAME=你的米筐账号
+RQDATA_PASSWORD=你的米筐密码
+```
+
+### 9.2 config.yaml 文件详解
+
+```yaml
+# 大模型配置
+llm:
+  model: deepseek-chat        # 默认模型
+  temperature: 0.35           # 温度（越低越稳定）
+  max_tokens: 4000             # 最大输出 token 数
+
+# 数据源配置
+data_source:
+  sources:                     # 启用的数据源列表
+    - akshare
+    - eastmoney_http
+  auto_failover: true          # 主挂了自动切下一个
+  cross_check_enabled: true    # 多源交叉验证
+  cross_check_tolerance: 0.01  # 误差阈值（1%）
+
+# 反幻觉配置
+verify:
+  enabled: true                # 开启数字校验
+  tolerance: 0.01              # 数字容差（1%）
+  semantic_check: true         # 开启语义层校验
+
+# 推送配置
+notify:
+  enabled: false               # 默认关闭推送
+  channels:                    # 启用的推送渠道
+    - feishu
+```
+
+---
+
+## 十、最佳实践
+
+### 10.1 新手怎么用？
+
+1. **先跑 demo**：`python main.py demo`，不用密钥，用样例数据走通流程
+2. **配密钥**：去 `.env` 里填你的大模型 API
+3. **跑第一个速览**：`python main.py brief 600519`
+4. **打开 Web 界面**：`python main.py serve`，浏览器打开 http://localhost:8000
+
+### 10.2 进阶用户怎么用？
+
+1. **配多个数据源**：AKShare + Tushare 一起用，自动交叉验证
+2. **配每日推送**：飞书/企微机器人 + GitHub Actions 定时任务
+3. **跑 stats 看幻觉率**：跑 5-10 份报告后，看看你的模型靠不靠谱
+4. **选可信度 A 级的报告**：如果可信度是 B/C/D，建议人工复核
+
+### 10.3 怎么避免幻觉？
+
+1. **选好模型**：不同模型幻觉率不一样，用 `stats` 命令对比
+2. **多看反幻觉总览**：报告结尾有「🛡️ 反幻觉总览」章节
+3. **多源交叉验证**：选多个数据源，同一个数字不一样就标记出来
+4. **关键数据人工复核**：做投资决策前，关键数据自己再核对一下
+
+---
+
+## 十一、故障排查
+
+### 11.1 跑 brief 命令报错 ModuleNotFoundError
+
+**现象**：`ModuleNotFoundError: No module named 'akshare'`
+
+**解决**：
+```bash
+pip install -r requirements.txt
+```
+
+### 11.2 数据抓不到 / 超时
+
+**现象**：`⚠️ AKShare 抓取失败，自动切换到离线样例`
+
+**原因**：公开数据接口限流/偶发断连
+
+**解决**：
+- 等一会儿再跑（限流通常几分钟就恢复）
+- 或者配多个数据源（AKShare 挂了自动切新浪/腾讯）
+
+### 11.3 大模型报错 / 超时
+
+**现象**：`⚠️ 大模型调用失败`
+
+**原因**：API 密钥不对 / 网络问题 / 模型服务器挂了
+
+**解决**：
+- 检查 `.env` 里的 `LLM_API_KEY` 对不对
+- 检查网络能不能访问大模型 API
+- 换个模型试试
+
+### 11.4 Web 界面打不开
+
+**现象**：浏览器打开 http://localhost:8000 打不开
+
+**解决**：
+- 确认装了 fastapi：`pip install fastapi uvicorn`
+- 确认命令跑对了：`python main.py serve`
+- 看看端口有没有被占用：换个端口 `python main.py serve --port 8001`
+
+### 11.5 推送收不到
+
+**现象**：跑 `--push` 参数，但飞书/企微没收到消息
+
+**解决**：
+- 检查 `.env` 里的 webhook URL 对不对
+- 检查飞书/企微机器人有没有添加成功
+- 看看终端输出有没有「推送成功」的日志
+
+---
+
 > 💡 **还有问题？** 提 Issue，或者看 README 了解更多功能。
