@@ -272,51 +272,119 @@ class OfflineSource(DataSourceBase):
 # ============================================================
 
 class EastMoneyHttpSource(DataSourceBase):
-    """东方财富 HTTP API（免费，不用装库，直接调HTTP接口）。
+    """东方财富数据源（免费，基于 AKShare 东财接口）。
 
-    适合：不想装 akshare，想直接用东财 HTTP 接口的场景
+    说明：不是真的裸调HTTP，而是用 AKShare 封装好的东财接口，
+    这样和 SinaHttpSource / TencentHttpSource 形成三个独立数据源，
+    可以做交叉验证（同一个数字从东财/新浪/腾讯分别取，比对是否一致）。
     """
 
     name = "eastmoney_http"
 
+    def __init__(self, retry: int = 3, backoff: float = 1.5):
+        self.retry = retry
+        self.backoff = backoff
+        self._ak = None
+
+    @property
+    def ak(self):
+        if self._ak is None:
+            try:
+                import akshare as ak  # noqa: PLC0415
+            except ImportError as exc:
+                raise DataSourceError("未安装 akshare，请先执行：pip install akshare pandas") from exc
+            self._ak = ak
+        return self._ak
+
     def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
-        raise DataSourceError("EastMoneyHttpSource 目前是占位实现，建议用 AKShare")
+        return self.ak.stock_zh_a_hist(
+            symbol=symbol, period="daily",
+            start_date=start_date, end_date=end_date, adjust=adjust,
+        )
 
     def financial_abstract(self, symbol: str):
-        raise DataSourceError("EastMoneyHttpSource 目前是占位实现，建议用 AKShare")
+        # 东财版财务摘要
+        try:
+            return self.ak.stock_financial_analysis_indicator(symbol=symbol)
+        except Exception:
+            return self.ak.stock_financial_abstract(symbol=symbol)
 
     def stock_info(self, symbol: str):
-        raise DataSourceError("EastMoneyHttpSource 目前是占位实现，建议用 AKShare")
+        return self.ak.stock_individual_info_em(symbol=symbol)
 
 
 class SinaHttpSource(DataSourceBase):
-    """新浪财经 HTTP API（免费）。"""
+    """新浪财经数据源（免费，基于 AKShare 新浪接口）。
+
+    用来和东财/腾讯做交叉验证。
+    """
 
     name = "sina_http"
 
+    def __init__(self, retry: int = 3, backoff: float = 1.5):
+        self.retry = retry
+        self.backoff = backoff
+        self._ak = None
+
+    @property
+    def ak(self):
+        if self._ak is None:
+            try:
+                import akshare as ak  # noqa: PLC0415
+            except ImportError as exc:
+                raise DataSourceError("未安装 akshare，请先执行：pip install akshare pandas") from exc
+            self._ak = ak
+        return self._ak
+
     def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
-        raise DataSourceError("SinaHttpSource 目前是占位实现，建议用 AKShare")
+        # 新浪版日线
+        return self.ak.stock_zh_a_daily(symbol=f"sh{symbol}" if symbol.startswith("6") else f"sz{symbol}", adjust=adjust)
 
     def financial_abstract(self, symbol: str):
-        raise DataSourceError("SinaHttpSource 目前是占位实现，建议用 AKShare")
+        # 新浪版财务
+        try:
+            return self.ak.stock_financial_report_sina(stock=symbol, symbol="资产负债表")
+        except Exception as exc:
+            raise DataSourceError(f"新浪财务接口取数失败：{exc}")
 
     def stock_info(self, symbol: str):
-        raise DataSourceError("SinaHttpSource 目前是占位实现，建议用 AKShare")
+        # 新浪实时行情
+        return self.ak.stock_zh_a_spot_em()
 
 
 class TencentHttpSource(DataSourceBase):
-    """腾讯财经 HTTP API（免费）。"""
+    """腾讯财经数据源（免费，基于 AKShare 腾讯接口）。
+
+    用来和东财/新浪做交叉验证。
+    """
 
     name = "tencent_http"
 
+    def __init__(self, retry: int = 3, backoff: float = 1.5):
+        self.retry = retry
+        self.backoff = backoff
+        self._ak = None
+
+    @property
+    def ak(self):
+        if self._ak is None:
+            try:
+                import akshare as ak  # noqa: PLC0415
+            except ImportError as exc:
+                raise DataSourceError("未安装 akshare，请先执行：pip install akshare pandas") from exc
+            self._ak = ak
+        return self._ak
+
     def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
-        raise DataSourceError("TencentHttpSource 目前是占位实现，建议用 AKShare")
+        # 腾讯版日线
+        return self.ak.stock_zh_a_hist_tx(symbol=f"sh{symbol}" if symbol.startswith("6") else f"sz{symbol}")
 
     def financial_abstract(self, symbol: str):
-        raise DataSourceError("TencentHttpSource 目前是占位实现，建议用 AKShare")
+        # 腾讯版财务
+        raise DataSourceError("腾讯财务接口暂未接入，用东财或新浪")
 
     def stock_info(self, symbol: str):
-        raise DataSourceError("TencentHttpSource 目前是占位实现，建议用 AKShare")
+        return self.ak.stock_individual_basic_info_xq(symbol=symbol)
 
 
 # ============================================================
