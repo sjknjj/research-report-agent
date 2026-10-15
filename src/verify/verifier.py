@@ -208,13 +208,16 @@ class CrossVerifier:
 
         fact_text = self._display(claim.kind, fact.value)
         claim_text = self._display(claim.kind, claim.claimed)
+        period = fact.period or "最新"
         if ok:
             return {**base, "status": "supported", "claimed": claim.claimed,
-                    "fact": fact.value, "note": f"文本 {claim_text} ≈ 事实 {fact_text}，一致",
+                    "fact": fact.value, "period": period,
+                    "note": f"文本 {claim_text} ≈ 事实 {fact_text}（{period}），一致",
                     "correction": ""}
         return {**base, "status": "mismatch", "claimed": claim.claimed, "fact": fact.value,
-                "note": f"文本称 {claim_text}，但经数据核算应为 {fact_text}（{fact.period}），存在矛盾",
-                "correction": f"{claim.label}应为 {fact_text}（{fact.period}），而非 {claim_text}"}
+                "period": period,
+                "note": f"文本称 {claim_text}，但经数据核算应为 {fact_text}（{period}），存在矛盾",
+                "correction": f"{claim.label}应为 {fact_text}（{period}），而非 {claim_text}"}
 
     @staticmethod
     def _display(kind: str, value: float) -> str:
