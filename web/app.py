@@ -37,6 +37,8 @@ _PAGE = """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>研报辅助 Agent 3.0</title>
+<!-- 引入 Markdown 渲染库 -->
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <style>
 *{box-sizing:border-box;}
 body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
@@ -56,6 +58,20 @@ button.secondary{background:#fff;color:#0f4c81;border:1px solid #0f4c81;}
 .row{display:flex;gap:8px;margin:12px 0;align-items:center;}
 .result{white-space:pre-wrap;margin-top:16px;line-height:1.8;font-size:14px;
 max-height:500px;overflow-y:auto;padding:12px;background:#fafbfc;border-radius:8px;}
+
+/* Markdown 渲染后的样式 */
+.result h1 {font-size:22px;margin:16px 0 8px;color:#1f2329;}
+.result h2 {font-size:18px;margin:14px 0 6px;color:#1f2329;}
+.result h3 {font-size:16px;margin:12px 0 4px;color:#374151;}
+.result p {margin:8px 0;}
+.result ul, .result ol {margin:8px 0;padding-left:24px;}
+.result li {margin:4px 0;}
+.result table {border-collapse:collapse;width:100%;margin:12px 0;}
+.result th, .result td {border:1px solid #e5e7eb;padding:8px;text-align:left;}
+.result th {background:#f3f4f6;font-weight:600;}
+.result code {background:#f3f4f6;padding:2px 6px;border-radius:4px;font-size:13px;}
+.result pre {background:#f3f4f6;padding:12px;border-radius:8px;overflow-x:auto;}
+.result blockquote {border-left:4px solid #d1d5db;padding-left:12px;margin:8px 0;color:#6b7280;}
 .tip{color:#6b7280;font-size:13px;}
 h3{margin:0 0 12px;font-size:17px;}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid #ccc;
@@ -266,10 +282,10 @@ async function startBrief(){
     const r=await fetch('/api/brief?symbol='+encodeURIComponent(sym)+'&sources='+encodeURIComponent(sources));
     const d=await r.json();
     if(d.error){el.textContent='错误：'+d.error;return;}
-    el.textContent=d.text;
+    el.innerHTML = marked.parse(d.text);
     if(d.verification && d.verification.passed !== undefined){
       const v=d.verification;
-      el.textContent += `\\n\\n---\\n交叉校验：${v.passed?'通过':'未通过'}｜一致${v.supported}、矛盾${v.mismatch}、幻觉率${(v.hallucination_rate*100).toFixed(1)}%`;
+      el.innerHTML += `<hr><p style="color:#6b7280;font-size:13px;">交叉校验：${v.passed?'✅ 通过':'⚠️ 未通过'}｜一致${v.supported}、矛盾${v.mismatch}、幻觉率${(v.hallucination_rate*100).toFixed(1)}%</p>`;
     }
   }catch(e){el.textContent='请求失败：'+e;}
 }
@@ -318,7 +334,7 @@ async function startReport(){
     } else if(data.type==='done'){
       es.close();
       progEl.innerHTML='✅ 生成完成';
-      resultEl.textContent=data.text;
+      resultEl.innerHTML = marked.parse(data.text);
     } else if(data.type==='error'){
       es.close();
       progEl.innerHTML='❌ 出错了';
