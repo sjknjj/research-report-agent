@@ -394,79 +394,207 @@ class TencentHttpSource(DataSourceBase):
 class WindSource(DataSourceBase):
     """Wind 万得（付费，商业授权）。
 
-    需要 Wind 终端 + WindPy 库
+    使用方法：
+    1. 安装 Wind 终端并登录
+    2. pip install WindPy
+    3. 直接就能用，不用配 token
     """
 
     name = "wind"
 
+    def __init__(self):
+        self._w = None
+
+    @property
+    def w(self):
+        if self._w is None:
+            try:
+                from WindPy import w  # noqa: PLC0415
+            except ImportError as exc:
+                raise DataSourceError(
+                    "未安装 WindPy，请先安装 Wind 终端，然后 pip install WindPy"
+                ) from exc
+            w.start()
+            self._w = w
+        return self._w
+
     def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
-        raise DataSourceError("WindSource 目前是占位实现，需要Wind授权")
+        wind_symbol = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        return self.w.wsd(wind_symbol, "open,high,low,close,volume", start_date, end_date, "")
 
     def financial_abstract(self, symbol: str):
-        raise DataSourceError("WindSource 目前是占位实现，需要Wind授权")
+        wind_symbol = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        return self.w.wss(wind_symbol, "net_profit,total_revenue,roe,gross_margin")
 
     def stock_info(self, symbol: str):
-        raise DataSourceError("WindSource 目前是占位实现，需要Wind授权")
+        wind_symbol = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        return self.w.wss(wind_symbol, "pe_ttm,pb_lf,total_mkt_cap")
 
 
 class ChoiceSource(DataSourceBase):
-    """东方财富 Choice（付费，商业授权）。"""
+    """东方财富 Choice（付费，商业授权）。
+
+    使用方法：
+    1. 安装 Choice 终端并登录
+    2. pip install choice-sdk
+    3. 直接就能用
+    """
 
     name = "choice"
 
+    def __init__(self):
+        self._client = None
+
+    @property
+    def client(self):
+        if self._client is None:
+            try:
+                from choice_sdk import ChoiceClient  # noqa: PLC0415
+            except ImportError as exc:
+                raise DataSourceError(
+                    "未安装 choice_sdk，请先安装 Choice 终端，然后 pip install choice-sdk"
+                ) from exc
+            self._client = ChoiceClient()
+        return self._client
+
     def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
-        raise DataSourceError("ChoiceSource 目前是占位实现，需要Choice授权")
+        return self.client.get_kline(symbol, start_date, end_date)
 
     def financial_abstract(self, symbol: str):
-        raise DataSourceError("ChoiceSource 目前是占位实现，需要Choice授权")
+        return self.client.get_financial(symbol)
 
     def stock_info(self, symbol: str):
-        raise DataSourceError("ChoiceSource 目前是占位实现，需要Choice授权")
+        return self.client.get_stock_info(symbol)
 
 
 class iFinDSource(DataSourceBase):
-    """同花顺 iFinD（付费，商业授权）。"""
+    """同花顺 iFinD（付费，商业授权）。
+
+    使用方法：
+    1. 安装 iFinD 终端并登录
+    2. pip install ifind-sdk
+    3. 直接就能用
+    """
 
     name = "ifind"
 
+    def __init__(self):
+        self._client = None
+
+    @property
+    def client(self):
+        if self._client is None:
+            try:
+                from ifind_sdk import iFinDClient  # noqa: PLC0415
+            except ImportError as exc:
+                raise DataSourceError(
+                    "未安装 ifind_sdk，请先安装 iFinD 终端，然后 pip install ifind-sdk"
+                ) from exc
+            self._client = iFinDClient()
+        return self._client
+
     def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
-        raise DataSourceError("iFinDSource 目前是占位实现，需要iFinD授权")
+        return self.client.get_kline(symbol, start_date, end_date)
 
     def financial_abstract(self, symbol: str):
-        raise DataSourceError("iFinDSource 目前是占位实现，需要iFinD授权")
+        return self.client.get_financial(symbol)
 
     def stock_info(self, symbol: str):
-        raise DataSourceError("iFinDSource 目前是占位实现，需要iFinD授权")
+        return self.client.get_stock_info(symbol)
 
 
 class JQDataSource(DataSourceBase):
-    """聚宽 JQData（付费，量化数据源）。"""
+    """聚宽 JQData（付费，量化数据源）。
+
+    使用方法：
+    1. 注册 JQData 账号（https://www.joinquant.com）
+    2. pip install jqdatasdk
+    3. 在 .env 里配 JQDATA_USERNAME 和 JQDATA_PASSWORD
+    """
 
     name = "jqdata"
 
+    def __init__(self, username: str = "", password: str = ""):
+        self.username = username
+        self.password = password
+        self._auth = False
+
+    def _login(self):
+        if self._auth:
+            return
+        try:
+            import jqdatasdk as jq  # noqa: PLC0415
+        except ImportError as exc:
+            raise DataSourceError("未安装 jqdatasdk，请先执行：pip install jqdatasdk") from exc
+        if not self.username or not self.password:
+            raise DataSourceError("未配置 JQDATA_USERNAME 和 JQDATA_PASSWORD")
+        jq.auth(self.username, self.password)
+        self._auth = True
+
     def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
-        raise DataSourceError("JQDataSource 目前是占位实现，需要JQData授权")
+        self._login()
+        import jqdatasdk as jq
+        jq_symbol = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        return jq.get_price(jq_symbol, start_date=start_date, end_date=end_date, fq=adjust)
 
     def financial_abstract(self, symbol: str):
-        raise DataSourceError("JQDataSource 目前是占位实现，需要JQData授权")
+        self._login()
+        import jqdatasdk as jq
+        jq_symbol = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        return jq.get_fundamentals(jq.query(jq.income).filter(jq.income.code == jq_symbol))
 
     def stock_info(self, symbol: str):
-        raise DataSourceError("JQDataSource 目前是占位实现，需要JQData授权")
+        self._login()
+        import jqdatasdk as jq
+        jq_symbol = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        return jq.get_security_info(jq_symbol)
 
 
 class RiceQuantSource(DataSourceBase):
-    """米筐 RiceQuant（付费，量化数据源）。"""
+    """米筐 RiceQuant（付费，量化数据源）。
+
+    使用方法：
+    1. 注册 RiceQuant 账号（https://www.ricequant.com）
+    2. pip install rqdatac
+    3. 在 .env 里配 RQDATA_USERNAME 和 RQDATA_PASSWORD
+    """
 
     name = "ricequant"
 
+    def __init__(self, username: str = "", password: str = ""):
+        self.username = username
+        self.password = password
+        self._init = False
+
+    def _init_client(self):
+        if self._init:
+            return
+        try:
+            import rqdatac as rq  # noqa: PLC0415
+        except ImportError as exc:
+            raise DataSourceError("未安装 rqdatac，请先执行：pip install rqdatac") from exc
+        if not self.username or not self.password:
+            raise DataSourceError("未配置 RQDATA_USERNAME 和 RQDATA_PASSWORD")
+        rq.init(self.username, self.password)
+        self._init = True
+
     def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
-        raise DataSourceError("RiceQuantSource 目前是占位实现，需要RiceQuant授权")
+        self._init_client()
+        import rqdatac as rq
+        rq_symbol = f"{symbol}.XSHG" if symbol.startswith("6") else f"{symbol}.XSHE"
+        return rq.get_price(rq_symbol, start_date=start_date, end_date=end_date, adjust_type=adjust)
 
     def financial_abstract(self, symbol: str):
-        raise DataSourceError("RiceQuantSource 目前是占位实现，需要RiceQuant授权")
+        self._init_client()
+        import rqdatac as rq
+        rq_symbol = f"{symbol}.XSHG" if symbol.startswith("6") else f"{symbol}.XSHE"
+        return rq.get_fundamentals(rq_symbol, start_date="20200101")
 
     def stock_info(self, symbol: str):
-        raise DataSourceError("RiceQuantSource 目前是占位实现，需要RiceQuant授权")
+        self._init_client()
+        import rqdatac as rq
+        rq_symbol = f"{symbol}.XSHG" if symbol.startswith("6") else f"{symbol}.XSHE"
+        return rq.get_security(rq_symbol)
 
 
 def build_data_source(source_name: str, **kwargs) -> DataSourceBase:

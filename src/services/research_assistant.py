@@ -65,6 +65,7 @@ class ResearchAssistant:
         settings: Any,
         data_service: Optional[DataService] = None,
         verifier: Optional[CrossVerifier] = None,
+        sources: Optional[List[str]] = None,
     ):
         self.settings = settings
         self.llm = LLMClient(settings)
@@ -75,6 +76,8 @@ class ResearchAssistant:
         self.vector_store = VectorStore(
             persist_path=os.path.join(os.path.dirname(__file__), "..", "..", "data", "rag_index.json")
         )
+        # v3.7：用户选中的数据源列表（默认只用 akshare）
+        self.sources = sources or ["akshare"]
 
     # ------------------------------------------------------------------
     def company_brief(

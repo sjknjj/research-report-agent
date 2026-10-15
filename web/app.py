@@ -109,11 +109,23 @@ border-radius:6px;font-size:13px;cursor:pointer;}
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
           <input type="checkbox" name="datasource" value="tencent_http"> 腾讯财经
         </label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;opacity:0.5;">
-          <input type="checkbox" name="datasource" value="tushare" disabled> Tushare（付费）
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="datasource" value="tushare"> Tushare（配Token可用）
         </label>
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;opacity:0.5;">
-          <input type="checkbox" name="datasource" value="wind" disabled> Wind（付费）
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="datasource" value="wind"> Wind（装终端可用）
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="datasource" value="choice"> Choice（装终端可用）
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="datasource" value="ifind"> iFinD（装终端可用）
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="datasource" value="jqdata"> JQData（配账号可用）
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" name="datasource" value="ricequant"> RiceQuant（配账号可用）
         </label>
       </div>
       <div style="font-size:12px;color:#6b7280;margin-top:8px;">
@@ -278,14 +290,15 @@ def index():
 @app.get("/api/brief", response_model=BriefResponse)
 def api_brief(symbol: str, sources: str = "akshare"):
     settings = get_settings()
-    ra = ResearchAssistant(settings)
+    # 把用户选中的数据源列表传给 ResearchAssistant
+    source_list = [s.strip() for s in sources.split(",") if s.strip()]
+    ra = ResearchAssistant(settings, sources=source_list)
     try:
         result = ra.company_brief(symbol, prefer_live=True)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc))
 
     # 把用户选中的数据源加到报告里
-    source_list = [s.strip() for s in sources.split(",") if s.strip()]
     source_info = f"\n\n---\n\n📊 **本次使用的数据源**：{', '.join(source_list)}\n"
     if len(source_list) > 1:
         source_info += f"\n✅ 已启用多源交叉验证（{len(source_list)}个数据源）\n"
