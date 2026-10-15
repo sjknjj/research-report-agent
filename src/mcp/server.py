@@ -1,24 +1,27 @@
 """MCP Server（3.0新增）：把本项目核心能力暴露为标准 MCP 工具。
 
 遵循 Model Context Protocol 基本规范（JSON-RPC 2.0），
-Claude Desktop / Cursor 等支持 MCP 的客户端可直接接入本项目作为工具使用。
+实现了 ``initialize`` / ``notifications/initialized`` / ``ping`` / ``tools/list`` / ``tools/call``，
+Claude Desktop / Cursor 等支持 MCP 的客户端可完成握手并接入本项目作为工具使用。
 
 暴露的工具：
 - get_stock_brief：获取 A 股公司投研速览（含反幻觉校验）
 - verify_numbers：数字交叉校验（反幻觉）
-- search_web：网页检索
-- generate_report：生成通用研报（多智能体流水线）
+- generate_stock_report：生成完整 A 股研究报告（多智能体流水线）
 """
 from __future__ import annotations
 
-import json
-from typing import Any, Dict, List
+from typing import Any, Dict, Optional
 
 from ..common.config import Settings, load_settings
 from ..common.logger import get_logger
 from ..services.research_assistant import ResearchAssistant
 
 logger = get_logger("mcp.server")
+
+# 对外声明的 MCP 协议版本与服务器信息
+PROTOCOL_VERSION = "2024-11-05"
+SERVER_INFO = {"name": "research-report-agent", "version": "3.7.0"}
 
 
 # MCP 工具声明（符合 MCP tools/list 格式）
@@ -60,6 +63,21 @@ TOOLS_DECLARATION = [
     },
 ]
 
+# 工具名 -> 必填参数（用于 tools/call 参数校验）
+_REQUIRED_ARGS = {
+    tool["name"]: list(tool["inputSchema"].get("required") or [])
+    for tool in TOOLS_DECLARATION
+}
+
+
+class JSONRPCError(Exception):
+    """带 JSON-RPC 错误码的异常。"""
+
+    def __init__(self, code: int, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
 
 class MCPServer:
     """MCP Server：处理 JSON-RPC 格式的工具调用请求。"""
@@ -68,43 +86,76 @@ class MCPServer:
         self.settings = settings or load_settings()
         self.assistant = ResearchAssistant(self.settings)
 
-    def handle(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """处理单个 JSON-RPC 请求，返回响应。"""
+    def handle(self, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """处理单个 JSON-RPC 请求。
+
+        返回响应字典；对通知类方法（``notifications/*``）返回 ``None``，
+        表示按 JSON-RPC / MCP 规范**不发送任何响应**。
+        """
         method = request.get("method", "")
         req_id = request.get("id")
-        params = request.get("params", {})
+        params = request.get("params") or {}
 
         try:
+            if method == "initialize":
+                return self._ok(req_id, {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {"tools": {"listChanged": False}},
+                    "serverInfo": SERVER_INFO,
+                })
+            if method.startswith("notifications/"):
+                # 通知没有 id，也绝不能回响应
+                logger.debug("收到 MCP 通知：%s", method)
+                return None
             if method == "tools/list":
-                result = {"tools": TOOLS_DECLARATION}
-            elif method == "tools/call":
-                result = self._call_tool(params)
-            elif method == "ping":
-                result = {"status": "ok"}
-            else:
-                return self._error(req_id, -32601, f"未知方法：{method}")
-            return {"jsonrpc": "2.0", "id": req_id, "result": result}
+                return self._ok(req_id, {"tools": TOOLS_DECLARATION})
+            if method == "tools/call":
+                return self._ok(req_id, self._call_tool(params))
+            if method == "ping":
+                # MCP 规范要求 ping 返回空对象
+                return self._ok(req_id, {})
+            return self._error(req_id, -32601, f"未知方法：{method}")
+        except JSONRPCError as exc:
+            return self._error(req_id, exc.code, exc.message)
         except Exception as exc:  # noqa: BLE001
             logger.warning("MCP 调用异常：%s", exc)
-            return self._error(req_id, -32000, str(exc))
+            return self._error(req_id, -32603, str(exc))
 
+    # ------------------------------------------------------------------
     def _call_tool(self, params: dict) -> dict:
+        if not isinstance(params, dict):
+            raise JSONRPCError(-32602, "params 必须是对象")
         name = params.get("name", "")
-        arguments = params.get("arguments", {})
+        arguments = params.get("arguments")
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            raise JSONRPCError(-32602, "arguments 必须是对象")
+        if name not in _REQUIRED_ARGS:
+            raise JSONRPCError(-32602, f"未知工具：{name}")
 
-        if name == "get_stock_brief":
-            return self._tool_brief(arguments)
-        elif name == "verify_numbers":
-            return self._tool_verify(arguments)
-        elif name == "generate_stock_report":
-            return self._tool_report(arguments)
-        else:
-            raise ValueError(f"未知工具：{name}")
+        missing = [key for key in _REQUIRED_ARGS[name] if not arguments.get(key)]
+        if missing:
+            raise JSONRPCError(-32602, f"参数不合法：缺少/为空 {', '.join(missing)}")
+
+        handlers = {
+            "get_stock_brief": self._tool_brief,
+            "verify_numbers": self._tool_verify,
+            "generate_stock_report": self._tool_report,
+        }
+        try:
+            result = handlers[name](arguments)
+        except Exception as exc:  # noqa: BLE001 - 工具执行失败用 isError 表达，不中断服务
+            logger.warning("MCP 工具 %s 执行失败：%s", name, exc)
+            return {
+                "content": [{"type": "text", "text": f"工具执行失败：{exc}"}],
+                "isError": True,
+            }
+        result.setdefault("isError", False)
+        return result
 
     def _tool_brief(self, args: dict) -> dict:
         symbol = args.get("symbol", "")
-        if not symbol:
-            raise ValueError("缺少 symbol 参数")
         result = self.assistant.company_brief(symbol, prefer_live=True)
         return {
             "content": [{"type": "text", "text": result.text}],
@@ -141,6 +192,11 @@ class MCPServer:
             "sections": len(report.sections),
             "references": len(report.references),
         }
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _ok(req_id, result: dict) -> dict:
+        return {"jsonrpc": "2.0", "id": req_id, "result": result}
 
     @staticmethod
     def _error(req_id, code: int, message: str) -> dict:

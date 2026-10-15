@@ -11,17 +11,82 @@
 from __future__ import annotations
 
 import time
-from typing import Any, List, Optional
+from datetime import datetime
+from typing import Optional
 
 import pandas as pd
 
 from ..common.logger import get_logger
+from . import sample_data
 
 logger = get_logger("data.sources")
 
 
 class DataSourceError(RuntimeError):
     """数据抓取异常。"""
+
+
+def _exchange(symbol: str) -> str:
+    """根据 6 位代码推断交易所：SH / SZ / BJ。
+
+    北交所（4xx/8xx/920）之前被误判为深市，这里显式区分。
+    """
+    code = str(symbol).strip().upper()
+    for prefix in ("SH", "SZ", "BJ"):
+        if code.startswith(prefix):
+            code = code[len(prefix):]
+    code = code.split(".")[0]
+    if code.startswith("92"):
+        return "BJ"  # 北交所新代码段（920xxx）
+    if code.startswith(("6", "9", "5")):
+        return "SH"
+    if code.startswith(("0", "2", "3")):
+        return "SZ"
+    if code.startswith(("4", "8")):
+        return "BJ"
+    return "SZ"
+
+
+def _exchange_suffix(symbol: str, style: str = "dot") -> str:
+    """返回带交易所后缀的代码。
+
+    style：``dot``（600519.SH）/ ``jq``（600519.XSHG）/ ``prefix``（sh600519）。
+    """
+    ex = _exchange(symbol)
+    code = str(symbol).strip().upper()
+    for prefix in ("SH", "SZ", "BJ"):
+        if code.startswith(prefix):
+            code = code[len(prefix):]
+    code = code.split(".")[0]
+    if style == "jq":
+        return code + {"SH": ".XSHG", "SZ": ".XSHE", "BJ": ".XBSE"}[ex]
+    if style == "prefix":
+        return ex.lower() + code
+    return code + "." + ex
+
+
+def _retryable_call(func, retry: int = 3, backoff: float = 1.5, label: str = "", **kwargs):
+    """对免费 HTTP 数据源做有限次重试。
+
+    空 DataFrame 同样视为失败并重试——限流时接口常常返回空表而不是抛异常。
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, max(1, retry) + 1):
+        try:
+            data = func(**kwargs)
+            if data is None or (hasattr(data, "empty") and data.empty):
+                raise DataSourceError(f"{label or '接口'} 返回空数据")
+            return data
+        except Exception as exc:  # noqa: BLE001 - 免费接口异常类型繁杂，统一重试
+            last_exc = exc
+            if attempt < max(1, retry):
+                wait = backoff * attempt
+                logger.info(
+                    "%s 第 %d 次调用失败（%s），%.1fs 后重试",
+                    label or "接口", attempt, type(exc).__name__, wait,
+                )
+                time.sleep(wait)
+    raise DataSourceError(f"{label or '接口'} 重试 {retry} 次仍失败：{last_exc}")
 
 
 class DataSourceBase:
@@ -72,7 +137,7 @@ class AKShareSource(DataSourceBase):
         return self._ak
 
     def _call(self, func_name: str, **kwargs) -> pd.DataFrame:
-        """带重试地调用 akshare 接口函数。"""
+        """带重试地调用 akshare 接口函数（空结果也会重试，限流常表现为空表）。"""
         last_exc: Optional[Exception] = None
         for attempt in range(1, self.retry + 1):
             try:
@@ -81,8 +146,6 @@ class AKShareSource(DataSourceBase):
                 if df is None or (hasattr(df, "empty") and df.empty):
                     raise DataSourceError(f"接口 {func_name} 返回空数据")
                 return df
-            except DataSourceError:
-                raise
             except Exception as exc:  # noqa: BLE001 - akshare 异常类型繁杂，统一兜底
                 last_exc = exc
                 if attempt < self.retry:
@@ -158,18 +221,38 @@ class AKShareSource(DataSourceBase):
         return self._call("stock_a_indicator_lg", symbol=symbol)
 
     def unlock_detail(self, symbol: str = "") -> pd.DataFrame:
-        """限售解禁明细（可按代码过滤）。"""
-        if symbol:
-            return self._call("stock_restricted_release_queue_em")
-        return self._call("stock_restricted_release_queue_em")
+        """限售解禁明细（按个股代码查询）。"""
+        if not symbol:
+            raise DataSourceError("unlock_detail 需要提供股票代码 symbol")
+        return self._call("stock_restricted_release_queue_em", symbol=symbol)
 
     def margin_detail(self, symbol: str) -> pd.DataFrame:
-        """融资融券·个股明细。"""
-        return self._call("stock_margin_detail_szse", date="20500101")
+        """融资融券·个股明细（按交易所选择接口，日期取最近交易日）。"""
+        if not symbol:
+            raise DataSourceError("margin_detail 需要提供股票代码 symbol")
+        # 不要硬编码未来日期；用当天日期（非交易日接口会返回空 → 重试后抛出，由上层容灾）
+        date = datetime.now().strftime("%Y%m%d")
+        ex = _exchange(symbol)
+        if ex == "SH":
+            df = self._call("stock_margin_detail_sse", date=date)
+        else:
+            # 深市 / 北交所走深市接口
+            df = self._call("stock_margin_detail_szse", date=date)
+        # 只保留该股票的记录，避免把全市场明细当个股数据
+        code_col = next(
+            (c for c in ("证券代码", "标的证券代码", "代码") if c in df.columns), None
+        )
+        if code_col is not None:
+            filtered = df[df[code_col].astype(str).str.contains(str(symbol), na=False)]
+            if filtered.empty:
+                raise DataSourceError(f"融资融券明细中未找到 {symbol}")
+            return filtered
+        return df
 
     def main_fund_flow(self, symbol: str) -> pd.DataFrame:
-        """东财·主力资金流向（个股近一月）。"""
-        return self._call("stock_individual_fund_flow", stock=symbol, market="ab")
+        """东财·主力资金流向（个股近一月，market 只能取 sh/sz/bj）。"""
+        market = {"SH": "sh", "SZ": "sz", "BJ": "bj"}[_exchange(symbol)]
+        return self._call("stock_individual_fund_flow", stock=symbol, market=market)
 
     @staticmethod
     def normalize_symbol(symbol: str) -> str:
@@ -213,15 +296,19 @@ class TushareSource(DataSourceBase):
         return self._ts
 
     def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
-        ts_code = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
-        return self.ts.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+        ts_code = _exchange_suffix(symbol, "dot")
+        # tushare 的 pro_bar 支持复权参数，不能把 adjust 丢掉（否则拿到的是不复权价）
+        params = {"ts_code": ts_code, "start_date": start_date, "end_date": end_date}
+        if adjust in ("qfq", "hfq"):
+            params["adj"] = adjust
+        return self.ts.pro_bar(**params)
 
     def financial_abstract(self, symbol: str):
-        ts_code = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        ts_code = _exchange_suffix(symbol, "dot")
         return self.ts.income(ts_code=ts_code)
 
     def stock_info(self, symbol: str):
-        ts_code = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        ts_code = _exchange_suffix(symbol, "dot")
         return self.ts.stock_basic(ts_code=ts_code)
 
 
@@ -233,7 +320,8 @@ class MCPSource(DataSourceBase):
     2. 在配置里指定 MCP Server 的地址
     3. 我们通过 MCP 协议调用它的工具取数
 
-    注意：目前是占位实现，未来完善
+    注意：目前是占位实现，所有方法都会抛出 DataSourceError；
+    配置数据源时请把它放在其它可用数据源之后作为“不可用占位”。
     """
 
     name = "mcp"
@@ -253,18 +341,35 @@ class MCPSource(DataSourceBase):
 
 
 class OfflineSource(DataSourceBase):
-    """离线样例数据源（容灾用，主数据源挂了自动切这个）。"""
+    """离线样例数据源（容灾链的最后一环，返回内置虚构样例而不是抛异常）。
+
+    注意：返回的是 ``data/samples`` 下的静态样例，与请求的 symbol 无关；
+    ``DataService`` 会在容灾切到本数据源时把 ``source`` 如实标注为 ``sample``。
+    """
 
     name = "offline"
 
+    def _ensure_samples(self) -> None:
+        missing = sample_data.ensure_samples_exist()
+        if missing:
+            raise DataSourceError(f"离线样例不存在，请先运行 python {missing}")
+
     def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
-        raise DataSourceError("OfflineSource 只提供静态样例，不支持动态取数")
+        self._ensure_samples()
+        return sample_data.sample_price_raw().copy()
 
     def financial_abstract(self, symbol: str):
-        raise DataSourceError("OfflineSource 只提供静态样例，不支持动态取数")
+        self._ensure_samples()
+        return sample_data.sample_financial_raw().copy()
 
     def stock_info(self, symbol: str):
-        raise DataSourceError("OfflineSource 只提供静态样例，不支持动态取数")
+        # 样例数据没有个股信息，返回两列长表供 clean_info 使用（明确标注为离线样例）
+        return pd.DataFrame(
+            {
+                "item": ["数据来源", "说明"],
+                "value": ["离线虚构样例", "非真实证券，仅用于演示"],
+            }
+        )
 
 
 # ============================================================
@@ -297,20 +402,30 @@ class EastMoneyHttpSource(DataSourceBase):
         return self._ak
 
     def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
-        return self.ak.stock_zh_a_hist(
+        return _retryable_call(
+            self.ak.stock_zh_a_hist, self.retry, self.backoff, "东财日线",
             symbol=symbol, period="daily",
             start_date=start_date, end_date=end_date, adjust=adjust,
         )
 
     def financial_abstract(self, symbol: str):
-        # 东财版财务摘要
+        # 东财版财务摘要：主接口失败再换备用接口，两个接口都带重试
         try:
-            return self.ak.stock_financial_analysis_indicator(symbol=symbol)
+            return _retryable_call(
+                self.ak.stock_financial_analysis_indicator, self.retry, self.backoff,
+                "东财财务指标", symbol=symbol,
+            )
         except Exception:
-            return self.ak.stock_financial_abstract(symbol=symbol)
+            return _retryable_call(
+                self.ak.stock_financial_abstract, self.retry, self.backoff,
+                "东财财务摘要", symbol=symbol,
+            )
 
     def stock_info(self, symbol: str):
-        return self.ak.stock_individual_info_em(symbol=symbol)
+        return _retryable_call(
+            self.ak.stock_individual_info_em, self.retry, self.backoff,
+            "东财个股信息", symbol=symbol,
+        )
 
 
 class SinaHttpSource(DataSourceBase):
@@ -337,19 +452,46 @@ class SinaHttpSource(DataSourceBase):
         return self._ak
 
     def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
-        # 新浪版日线
-        return self.ak.stock_zh_a_daily(symbol=f"sh{symbol}" if symbol.startswith("6") else f"sz{symbol}", adjust=adjust)
+        # 新浪版日线（bj 前缀供北交所使用）
+        return _retryable_call(
+            self.ak.stock_zh_a_daily, self.retry, self.backoff, "新浪日线",
+            symbol=_exchange_suffix(symbol, "prefix"), adjust=adjust,
+        )
 
     def financial_abstract(self, symbol: str):
         # 新浪版财务
         try:
-            return self.ak.stock_financial_report_sina(stock=symbol, symbol="资产负债表")
+            return _retryable_call(
+                self.ak.stock_financial_report_sina, self.retry, self.backoff,
+                "新浪财务", stock=symbol, symbol="资产负债表",
+            )
         except Exception as exc:
             raise DataSourceError(f"新浪财务接口取数失败：{exc}")
 
     def stock_info(self, symbol: str):
-        # 新浪实时行情
-        return self.ak.stock_zh_a_spot_em()
+        """新浪实时行情，**过滤出该股票**并整理为 item/value 两列长表。
+
+        修复前返回的是东财全市场快照（``stock_zh_a_spot_em``），
+        会被 clean_info 当成该股票的信息拼成垃圾。
+        """
+        df = _retryable_call(
+            self.ak.stock_zh_a_spot, self.retry, self.backoff, "新浪实时行情",
+        )
+        code_col = next(
+            (c for c in ("代码", "symbol", "代码编号") if c in df.columns), None
+        )
+        if code_col is None:
+            raise DataSourceError("新浪实时行情缺少代码列，无法定位个股")
+        row = df[df[code_col].astype(str).str.contains(str(symbol), na=False)]
+        if row.empty:
+            raise DataSourceError(f"新浪实时行情中未找到 {symbol}")
+        record = row.iloc[0]
+        return pd.DataFrame(
+            {
+                "item": [str(c) for c in record.index],
+                "value": [str(record[c]) for c in record.index],
+            }
+        )
 
 
 class TencentHttpSource(DataSourceBase):
@@ -376,15 +518,21 @@ class TencentHttpSource(DataSourceBase):
         return self._ak
 
     def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
-        # 腾讯版日线
-        return self.ak.stock_zh_a_hist_tx(symbol=f"sh{symbol}" if symbol.startswith("6") else f"sz{symbol}")
+        # 腾讯版日线（接口本身不支持复权，adjust 仅作签名兼容）
+        return _retryable_call(
+            self.ak.stock_zh_a_hist_tx, self.retry, self.backoff, "腾讯日线",
+            symbol=_exchange_suffix(symbol, "prefix"),
+        )
 
     def financial_abstract(self, symbol: str):
-        # 腾讯版财务
+        # 腾讯财务接口暂未接入
         raise DataSourceError("腾讯财务接口暂未接入，用东财或新浪")
 
     def stock_info(self, symbol: str):
-        return self.ak.stock_individual_basic_info_xq(symbol=symbol)
+        return _retryable_call(
+            self.ak.stock_individual_basic_info_xq, self.retry, self.backoff,
+            "腾讯个股信息", symbol=symbol,
+        )
 
 
 # ============================================================
@@ -419,15 +567,15 @@ class WindSource(DataSourceBase):
         return self._w
 
     def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
-        wind_symbol = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        wind_symbol = _exchange_suffix(symbol, "dot")
         return self.w.wsd(wind_symbol, "open,high,low,close,volume", start_date, end_date, "")
 
     def financial_abstract(self, symbol: str):
-        wind_symbol = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        wind_symbol = _exchange_suffix(symbol, "dot")
         return self.w.wss(wind_symbol, "net_profit,total_revenue,roe,gross_margin")
 
     def stock_info(self, symbol: str):
-        wind_symbol = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        wind_symbol = _exchange_suffix(symbol, "dot")
         return self.w.wss(wind_symbol, "pe_ttm,pb_lf,total_mkt_cap")
 
 
@@ -534,19 +682,21 @@ class JQDataSource(DataSourceBase):
     def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
         self._login()
         import jqdatasdk as jq
-        jq_symbol = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
-        return jq.get_price(jq_symbol, start_date=start_date, end_date=end_date, fq=adjust)
+        jq_symbol = _exchange_suffix(symbol, "jq")
+        # jqdatasdk 的复权参数只认 pre/post，直接把 qfq 传进去会报错
+        fq = {"qfq": "pre", "hfq": "post"}.get(adjust)
+        return jq.get_price(jq_symbol, start_date=start_date, end_date=end_date, fq=fq)
 
     def financial_abstract(self, symbol: str):
         self._login()
         import jqdatasdk as jq
-        jq_symbol = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        jq_symbol = _exchange_suffix(symbol, "jq")
         return jq.get_fundamentals(jq.query(jq.income).filter(jq.income.code == jq_symbol))
 
     def stock_info(self, symbol: str):
         self._login()
         import jqdatasdk as jq
-        jq_symbol = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        jq_symbol = _exchange_suffix(symbol, "jq")
         return jq.get_security_info(jq_symbol)
 
 
@@ -581,19 +731,21 @@ class RiceQuantSource(DataSourceBase):
     def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
         self._init_client()
         import rqdatac as rq
-        rq_symbol = f"{symbol}.XSHG" if symbol.startswith("6") else f"{symbol}.XSHE"
-        return rq.get_price(rq_symbol, start_date=start_date, end_date=end_date, adjust_type=adjust)
+        rq_symbol = _exchange_suffix(symbol, "jq")
+        # rqdatac 的 adjust_type 只认 pre/post/none，不能直接传 qfq
+        adjust_type = {"qfq": "pre", "hfq": "post"}.get(adjust)
+        return rq.get_price(rq_symbol, start_date=start_date, end_date=end_date, adjust_type=adjust_type)
 
     def financial_abstract(self, symbol: str):
         self._init_client()
         import rqdatac as rq
-        rq_symbol = f"{symbol}.XSHG" if symbol.startswith("6") else f"{symbol}.XSHE"
+        rq_symbol = _exchange_suffix(symbol, "jq")
         return rq.get_fundamentals(rq_symbol, start_date="20200101")
 
     def stock_info(self, symbol: str):
         self._init_client()
         import rqdatac as rq
-        rq_symbol = f"{symbol}.XSHG" if symbol.startswith("6") else f"{symbol}.XSHE"
+        rq_symbol = _exchange_suffix(symbol, "jq")
         return rq.get_security(rq_symbol)
 
 

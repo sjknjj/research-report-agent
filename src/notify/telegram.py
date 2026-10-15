@@ -1,13 +1,20 @@
 """Telegram 推送（v3.4新增）。"""
 from __future__ import annotations
 
-from typing import Optional
 
 import requests
 
 from ..common.logger import get_logger
 
 logger = get_logger("notify.telegram")
+
+# Telegram MarkdownV2 需要转义的特殊字符
+_MDV2_SPECIAL = r"_*[]()~`>#+-=|{}.!"
+
+
+def _escape_md_v2(text: str) -> str:
+    """转义 MarkdownV2 特殊字符，避免 400 can't parse entities。"""
+    return "".join("\\" + ch if ch in _MDV2_SPECIAL else ch for ch in str(text or ""))
 
 
 class TelegramNotifier:
@@ -25,15 +32,15 @@ class TelegramNotifier:
         self.api_base = f"https://api.telegram.org/bot{bot_token}"
 
     def send_markdown(self, title: str, text: str) -> bool:
-        """发送 Markdown 格式消息。"""
-        full_text = f"*{title}*\n\n{text}"
+        """发送 MarkdownV2 消息（标题加粗，正文按 MarkdownV2 转义）。"""
+        full_text = f"*{_escape_md_v2(title)}*\n\n{_escape_md_v2(text)}"
         try:
             resp = requests.post(
                 f"{self.api_base}/sendMessage",
                 json={
                     "chat_id": self.chat_id,
                     "text": full_text,
-                    "parse_mode": "Markdown",
+                    "parse_mode": "MarkdownV2",
                     "disable_web_page_preview": True,
                 },
                 timeout=10,

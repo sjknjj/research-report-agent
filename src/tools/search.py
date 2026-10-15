@@ -1,9 +1,10 @@
 """联网检索工具。
 
-提供统一的检索接口与三种实现：
+提供统一的检索接口与多种实现：
 - :class:`MockSearchProvider`      离线占位（不访问网络，结果显式标注为占位，不伪造真实来源）
 - :class:`DuckDuckGoSearchProvider` 基于 DuckDuckGo HTML 端点，无需密钥
 - :class:`TavilySearchProvider`     基于 Tavily API，需要 TAVILY_API_KEY
+- :class:`MultiSearchProvider`      auto 模式下的多引擎顺序回退（惰性探测，构造期不联网）
 
 :func:`build_search_tool` 会根据配置自动选择，并在网络失败时安全回退，
 保证整条流水线不会因为单个检索渠道异常而中断。
@@ -76,6 +77,39 @@ class MockSearchProvider(BaseSearchProvider):
         return results
 
 
+class MultiSearchProvider(BaseSearchProvider):
+    """多引擎顺序回退渠道（auto 模式用）。
+
+    **构造期不发任何网络请求**，首次 ``search`` 时才逐个真实探测，
+    选中第一个返回结果的渠道并在后续调用中优先复用它；
+    某个渠道失败或无结果会自动尝试下一个，因此 DuckDuckGo 等后置渠道是可迭代到的。
+    """
+
+    name = "auto"
+
+    def __init__(self, providers: List[BaseSearchProvider]):
+        self.providers = list(providers)
+        self._active: Optional[BaseSearchProvider] = None
+
+    def search(self, query: str, max_results: int = 5) -> List[SearchResult]:
+        ordered = ([self._active] if self._active else []) + [
+            p for p in self.providers if p is not self._active
+        ]
+        for provider in ordered:
+            try:
+                results = provider.search(query, max_results)
+            except Exception as exc:  # noqa: BLE001 - 单个渠道异常不能中断回退链
+                logger.warning("检索渠道 %s 不可用：%s", provider.name, exc)
+                continue
+            if results:
+                if provider is not self._active:
+                    logger.info("检索渠道已选定：%s", provider.name)
+                    self._active = provider
+                return results
+            logger.info("检索渠道 %s 无结果，尝试下一个", provider.name)
+        return []
+
+
 class DuckDuckGoSearchProvider(BaseSearchProvider):
     """基于 DuckDuckGo HTML 端点的免费检索（无需密钥）。"""
 
@@ -118,15 +152,22 @@ class DuckDuckGoSearchProvider(BaseSearchProvider):
 
     @staticmethod
     def _decode_redirect(href: str) -> str:
-        """把 DuckDuckGo 跳转链接还原为真实 URL。"""
+        """把 DuckDuckGo 跳转链接还原为真实 URL（无法还原时返回空串，避免把跳转页当来源）。"""
+        if not href:
+            return ""
+        href = href.strip()
         if "uddg=" not in href:
-            return href.lstrip("/") if href.startswith("//") else href
+            # 协议相对链接 //example.com/a 要补上 scheme，否则会被 startswith("http") 丢弃
+            return "https:" + href if href.startswith("//") else href
         # 形如 //duckduckgo.com/l/?uddg=https%3A%2F%2F...&rut=...
         query_string = href.split("?", 1)[1] if "?" in href else href
         parsed = urllib.parse.parse_qs(query_string)
-        if "uddg" in parsed:
-            return urllib.parse.unquote(parsed["uddg"][0])
-        return href
+        values = parsed.get("uddg") or []
+        if not values or not str(values[0]).strip():
+            # uddg 为空：绝不回退成 DDG 自己的跳转链接
+            return ""
+        decoded = urllib.parse.unquote(str(values[0]).strip())
+        return "https:" + decoded if decoded.startswith("//") else decoded
 
 
 class BaiduSearchProvider(BaseSearchProvider):
@@ -159,7 +200,8 @@ class BaiduSearchProvider(BaseSearchProvider):
                 continue
             raw_href, raw_title = link.group(1), link.group(2)
             title = _strip_tags(raw_title)
-            snippet_match = re.search(r'<span class="content-right_8Zs40">(.*?)</span>', block, re.DOTALL)
+            # 百度会轮换混淆类名，摘要正则放宽为“任意 span”，抓不到就算了
+            snippet_match = re.search(r'<span[^>]*>(.*?)</span>', block, re.DOTALL)
             snippet = _strip_tags(snippet_match.group(1)) if snippet_match else ""
             if title and raw_href.startswith("http"):
                 results.append(
@@ -260,12 +302,14 @@ class SearchTool:
         self.per_query = per_query
 
     def search_one(self, query: str) -> List[SearchResult]:
+        # provider 可能抛出 JSONDecodeError / KeyError / 任意异常，
+        # 这里统一兜底，兑现“安全回退”承诺
         try:
             results = self.provider.search(query, self.per_query)
             if results:
                 return results
-            logger.warning("渠道 %s 对「%s」无结果", self.provider.name, query)
-        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            logger.warning("渠道 %s 对「%s」无结果，回退到离线占位", self.provider.name, query)
+        except Exception as exc:  # noqa: BLE001
             logger.warning("渠道 %s 检索失败，已回退到离线占位：%s", self.provider.name, exc)
         return MockSearchProvider().search(query, self.per_query)
 
@@ -274,7 +318,9 @@ class SearchTool:
         queries: List[str],
         max_total: Optional[int] = None,
     ) -> List[SearchResult]:
-        """对多个检索词检索并按 URL 去重。"""
+        """对多个检索词检索并按 URL 去重；``max_total=0`` 合法表示不返回结果。"""
+        if max_total is not None and max_total <= 0:
+            return []
         merged: List[SearchResult] = []
         seen = set()
         for query in queries:
@@ -286,13 +332,17 @@ class SearchTool:
                     continue
                 seen.add(key)
                 merged.append(item)
-            if max_total and len(merged) >= max_total:
+            if max_total is not None and len(merged) >= max_total:
                 break
-        return merged[:max_total] if max_total else merged
+        return merged[:max_total] if max_total is not None else merged
 
 
 def build_search_tool(settings: Any) -> SearchTool:
-    """依据配置构建检索工具（含 auto 选择逻辑）。"""
+    """依据配置构建检索工具（含 auto 选择逻辑）。
+
+    注意：``auto`` 模式**不在构造期发起网络探测**（避免 MCP/orchestrator 每次新建都卡 15s），
+    而是返回惰性的 :class:`MultiSearchProvider`，首次检索时才逐个真实探测。
+    """
     provider_name = (settings.search_provider or "auto").lower()
 
     if provider_name == "mock":
@@ -315,18 +365,14 @@ def build_search_tool(settings: Any) -> SearchTool:
         elif settings.tavily_api_key:
             provider = TavilySearchProvider(settings.tavily_api_key)
         else:
-            # 国内用户优先用百度（不用翻墙），失败了再试必应
-            try:
-                provider = BaiduSearchProvider()
-                # 测试一下能不能用
-                test_results = provider.search("test", max_results=1)
-                if not test_results:
-                    raise Exception("百度搜索无结果")
-            except Exception:
-                try:
-                    provider = BingSearchProvider()
-                except Exception:
-                    provider = DuckDuckGoSearchProvider()
+            # 国内用户优先用百度（不用翻墙），失败后逐个回退到必应 / DuckDuckGo
+            provider = MultiSearchProvider(
+                [
+                    BaiduSearchProvider(),
+                    BingSearchProvider(),
+                    DuckDuckGoSearchProvider(),
+                ]
+            )
 
     logger.info("检索渠道：%s", provider.name)
     return SearchTool(provider, per_query=settings.max_results_per_query)

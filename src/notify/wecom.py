@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import json
-from typing import Optional
 
 import requests
 
@@ -25,9 +24,13 @@ class WeComNotifier:
         """发送纯文本。"""
         return self._send({"msgtype": "text", "text": {"content": text}})
 
-    def send_markdown(self, markdown: str) -> bool:
-        """发送 markdown 消息（企业微信支持有限）。"""
-        return self._send({"msgtype": "markdown", "markdown": {"content": markdown}})
+    def send_markdown(self, title: str, markdown: str) -> bool:
+        """发送 markdown 消息（企业微信支持有限）。
+
+        签名与 :class:`FeishuNotifier` 保持一致：``send_markdown(title, markdown)``。
+        """
+        content = f"**{title}**\n\n{markdown}" if title else markdown
+        return self._send({"msgtype": "markdown", "markdown": {"content": content}})
 
     def _send(self, payload: dict) -> bool:
         if not self.webhook_key:

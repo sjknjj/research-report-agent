@@ -19,6 +19,10 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from ..common.logger import get_logger
+
+logger = get_logger("data.cleaner")
+
 # ---------------------------------------------------------------------------
 # 基础解析
 # ---------------------------------------------------------------------------
@@ -41,7 +45,6 @@ def parse_cn_number(value: Any) -> float:
     if text in _MISSING or text.lower() in _MISSING:
         return np.nan
 
-    is_percent = "%" in text
     multiplier = 1.0
     if "万亿" in text:
         multiplier = 1e12
@@ -58,16 +61,32 @@ def parse_cn_number(value: Any) -> float:
 
 
 def parse_percent(value: Any) -> float:
-    """把百分比字符串解析为百分数数值（``46.84%`` -> 46.84），缺失返回 NaN。"""
+    """把百分比字符串解析为百分数数值（``46.84%`` -> 46.84），缺失返回 NaN。
+
+    注意口径：本函数返回的是“百分数数值”（42.3 表示 42.3%），**不做** ratio→percent 的换算。
+    因此：
+    - 字符串带 ``%``：一定按百分数解析；
+    - 数字 / 纯数字字符串：**原样返回**，即 ``0.42`` 会被当作 0.42%（而不是 42%）。
+    数据源（同花顺财务摘要）的百分比列基本都是 ``42.30`` 这种百分数口径，保持原样最安全；
+    若拿到 ``|value| < 1`` 的可疑值，只记一条 debug 日志提示人工确认，不擅自 ×100。
+    """
     if value is None or isinstance(value, bool):
         return np.nan
     if isinstance(value, (int, float, np.integer, np.floating)):
-        return float(value)
+        result = float(value)
+        if 0 < abs(result) < 1:
+            logger.debug("parse_percent 收到疑似比例值 %.4f（按百分数原样处理）", result)
+        return result
     text = str(value).strip().replace(",", "")
     if text in _MISSING or text.lower() in _MISSING:
         return np.nan
     match = _NUM_RE.search(text.replace(" ", ""))
-    return float(match.group()) if match else np.nan
+    if not match:
+        return np.nan
+    result = float(match.group())
+    if "%" not in text and 0 < abs(result) < 1:
+        logger.debug("parse_percent 收到疑似比例值 %s（按百分数原样处理）", text)
+    return result
 
 
 def _safe_round(value: Any, ndigits: int = 4) -> Optional[float]:
@@ -157,7 +176,10 @@ def summarize_price(clean: pd.DataFrame) -> Dict[str, Any]:
         "annual_volatility_pct": _safe_round(annual_vol, 2),
         "ma5": _safe_round(latest.get("ma5"), 2),
         "ma20": _safe_round(latest.get("ma20"), 2),
-        "total_amount_yuan": _safe_round(clean["amount"].sum() if "amount" in clean else np.nan, 0),
+        # min_count=1：全为 NaN 时返回 NaN（而不是错误的 0.0）
+        "total_amount_yuan": _safe_round(
+            clean["amount"].sum(min_count=1) if "amount" in clean else np.nan, 0
+        ),
     }
     ma20 = summary.get("ma20")
     if ma20 and summary["latest_close"]:
@@ -176,9 +198,10 @@ FINANCIAL_COLUMN_MAP = {
     "营业总收入同比增长率": "revenue_yoy",
     "营业收入": "revenue",
     "营业收入同比增长率": "revenue_yoy",
+    # 去重映射保留“先出现者”，因此把口径更准确的“归母净利润”放在“净利润”之前
+    "归母净利润": "net_profit",
     "净利润": "net_profit",
     "净利润同比增长率": "net_profit_yoy",
-    "归母净利润": "net_profit",
     "扣非净利润": "net_profit_deducted",
     "扣非净利润同比增长率": "net_profit_deducted_yoy",
     "基本每股收益": "eps",
@@ -274,14 +297,16 @@ def summarize_financial(clean: pd.DataFrame, recent_n: int = 5) -> Dict[str, Any
 
 
 def clean_info(df: pd.DataFrame) -> Dict[str, str]:
-    """清洗东财个股信息（两列长表 item/value）为字典。"""
+    """清洗个股信息（两列长表 item/value）为字典；失败时打日志并返回空字典。"""
     if df is None or df.empty:
         return {}
     cols = list(df.columns)
-    # 东财接口通常返回两列：item / value
+    # 接口通常返回两列：item / value
     if len(cols) >= 2:
         try:
             return {str(k).strip(): str(v).strip() for k, v in zip(df[cols[0]], df[cols[1]])}
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - 个股信息 best-effort
+            logger.warning("clean_info 解析失败，返回空信息：%s", exc)
             return {}
+    logger.warning("clean_info 列数不足（%d 列），返回空信息", len(cols))
     return {}
