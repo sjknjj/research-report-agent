@@ -124,53 +124,208 @@ python main.py serve
 
 ## 四、CLI 命令详解
 
-### 4.1 公司速览
+### 4.1 公司速览（brief）
 
+**作用**：输入股票代码，一键生成公司投研速览报告。
+
+**基本用法**：
 ```bash
-python main.py brief 600519                  # 贵州茅台速览
-python main.py brief 600519 --pdf           # 顺便导出 PDF
-python main.py brief 600519 --push          # 生成完自动推送到飞书/企微
+python main.py brief 600519
 ```
 
-### 4.2 深度研报
+**所有参数**：
 
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `symbol` | 股票代码（必填） | 无 |
+| `--start-date` | 开始日期（YYYY-MM-DD） | 一年前 |
+| `--end-date` | 结束日期（YYYY-MM-DD） | 今天 |
+| `--pdf` | 顺便导出 PDF | 关闭 |
+| `--push` | 生成完自动推送到飞书/企微 | 关闭 |
+| `--mode {auto,online,offline}` | 数据模式 | auto（自动选） |
+| `--model` | 用哪个模型 | 配置文件里的默认值 |
+| `--output` | 输出目录 | output/ |
+
+**示例**：
 ```bash
-python main.py report 低空经济产业链分析      # 生成完整研报
-python main.py report 低空经济产业链分析 --deep  # 开启递归深挖（多轮补检知识缺口）
+# 贵州茅台速览
+python main.py brief 600519
+
+# 五粮液速览，顺便导出 PDF
+python main.py brief 000858 --pdf
+
+# 泸州老窖速览，生成完自动推送到飞书
+python main.py brief 000568 --push
+
+# 指定时间范围
+python main.py brief 600519 --start-date 2024-01-01 --end-date 2024-12-31
+
+# 离线模式（不用密钥）
+python main.py brief 600519 --mode offline
 ```
 
-### 4.3 多公司对比
+**输出**：
+- `output/600519_brief.md`：Markdown 格式报告
+- `output/600519_brief.html`：HTML 格式报告（含图表）
+- `output/600519_brief.pdf`：PDF 格式报告（加了 --pdf 才会生成）
 
+---
+
+### 4.2 深度研报（report）
+
+**作用**：输入研究主题，多智能体流水线生成完整研报。
+
+**基本用法**：
 ```bash
-python main.py compare 600519 000858 000568   # 对比贵州茅台、五粮液、泸州老窖
-python main.py compare 600519 000858 --by roe # 按 ROE 排序
+python main.py report 低空经济产业链分析
 ```
 
-报告会自动生成：
+**所有参数**：
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `topic` | 研究主题（必填） | 无 |
+| `--deep` | 开启递归深挖（多轮补检知识缺口） | 关闭 |
+| `--mode {auto,online,offline}` | 数据模式 | auto |
+| `--model` | 用哪个模型 | 配置文件里的默认值 |
+| `--output` | 输出目录 | output/ |
+
+**示例**：
+```bash
+# 低空经济产业链分析
+python main.py report 低空经济产业链分析
+
+# 开启递归深挖（更深入，但更慢）
+python main.py report 低空经济产业链分析 --deep
+
+# 半导体行业深度研究
+python main.py report 半导体行业投资价值分析
+```
+
+**流水线流程**：
+1. **① 规划提纲**：大模型自动生成研究提纲
+2. **② 检索资料**：自动搜索相关资料
+3. **③ 逐章分析**：每章自动提炼要点
+4. **④ 多空辩论**：多方 vs 空方对抗分析
+5. **⑤ 撰写报告**：自动写成完整报告
+6. **⑥ 审校修订**：自动审校 + 修订
+
+---
+
+### 4.3 多公司对比（compare）
+
+**作用**：输入多个股票代码，横向对比，自动排序 + 雷达图。
+
+**基本用法**：
+```bash
+python main.py compare 600519 000858 000568
+```
+
+**所有参数**：
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `symbols` | 股票代码列表（至少 2 个） | 无 |
+| `--by` | 按哪个维度排序 | profit_yoy（净利同比） |
+| `--mode {auto,online,offline}` | 数据模式 | auto |
+
+**支持的排序维度**：
+
+| 维度 | 说明 |
+|---|---|
+| `profit_yoy` | 净利润同比（默认） |
+| `revenue_yoy` | 营收同比 |
+| `net_profit` | 净利润绝对值 |
+| `pe` | 市盈率（越低越排前） |
+| `pb` | 市净率（越低越排前） |
+| `roe` | ROE（越高越排前） |
+
+**示例**：
+```bash
+# 白酒三巨头对比
+python main.py compare 600519 000858 000568
+
+# 按 ROE 排序
+python main.py compare 600519 000858 000568 --by roe
+
+# 按市盈率排序（越低越便宜）
+python main.py compare 600519 000858 000568 --by pe
+```
+
+**输出**：
 - 📊 对比表格（PE/PB/增速/ROE/技术面）
 - 🕸️ 雷达图（5维度打分）
 - 📊 估值分位图（PE/PB 柱状图）
 
-### 4.4 公告提炼
+---
 
+### 4.4 公告提炼（announce）
+
+**作用**：把公告文本丢进去，自动提炼要点 + 跟财报交叉校验。
+
+**基本用法**：
 ```bash
 python main.py announce "这里粘贴公告文本"
 ```
 
-自动做：
+**所有参数**：
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `text` | 公告文本（必填） | 无 |
+| `--title` | 公告标题 | 公司公告 |
+| `--symbol` | 关联股票代码（用于交叉校验） | 无 |
+| `--mode {auto,online,offline}` | 数据模式 | auto |
+
+**示例**：
+```bash
+# 提炼公告
+python main.py announce "贵州茅台2023年营收1505亿，同比增长18%"
+
+# 关联股票代码，自动跟财报交叉校验
+python main.py announce "贵州茅台2023年营收1505亿，同比增长18%" --symbol 600519 --title "2023年年报公告"
+```
+
+**自动做什么**：
 - 提炼公告要点
 - 跟财报交叉校验数字
 - 标记「公告说的数字跟财报对不对得上」
 
+---
+
 ### 4.5 其他命令
+
+#### 历史报告（history）
 
 ```bash
 python main.py history                    # 列出所有历史报告
 python main.py history --keyword 600519   # 按关键词搜索
-python main.py monitor                     # 盘中实时监控（达涨跌幅阈值自动推送）
-python main.py monitor --threshold 3      # ±3% 就推送（默认 ±5%）
-python main.py stats                       # 查看幻觉率历史统计
-python main.py serve                       # 启动 Web 服务
+```
+
+#### 盘中实时监控（monitor）
+
+```bash
+python main.py monitor                     # 默认 ±5%，60秒轮询
+python main.py monitor --threshold 3       # ±3% 就推送
+python main.py monitor --interval 30      # 30 秒轮询一次
+```
+
+#### 幻觉率统计（stats）
+
+```bash
+python main.py stats                       # 查看幻觉率历史统计和模型可信度排名
+```
+
+#### 启动 Web 服务（serve）
+
+```bash
+python main.py serve                       # 默认 http://127.0.0.1:8000
+```
+
+#### 离线演示（demo）
+
+```bash
+python main.py demo                        # 用样例数据跑一遍，不用密钥
 ```
 
 ---
@@ -180,6 +335,23 @@ python main.py serve                       # 启动 Web 服务
 ### 5.1 Web 界面选（最方便）
 
 打开 Web 界面 → 公司速览页 → 勾选想用的数据源 → 生成速览。
+
+**数据源说明**：
+
+| 数据源 | 免费/付费 | 怎么用 |
+|---|---|---|
+| **AKShare** | 免费 | 默认启用，不用配 |
+| **东方财富 HTTP** | 免费 | 自动启用 |
+| **新浪财经 HTTP** | 免费 | 自动启用 |
+| **腾讯财经 HTTP** | 免费 | 自动启用 |
+| **Tushare** | 付费 | 配 `TUSHARE_TOKEN` 就能用 |
+| **Wind 万得** | 付费 | 装 Wind 终端 + WindPy |
+| **Choice 东方财富** | 付费 | 装 Choice 终端 + SDK |
+| **同花顺 iFinD** | 付费 | 装 iFinD 终端 + SDK |
+| **聚宽 JQData** | 付费 | 配账号密码 |
+| **米筐 RiceQuant** | 付费 | 配账号密码 |
+| **MCP** | 免费 | 接外部 MCP Server |
+| **离线样例** | 免费 | 容灾用，抓不到真实数据时自动回退 |
 
 ### 5.2 配置文件选（批量/定时任务用）
 
@@ -200,27 +372,61 @@ data_source:
     # - ricequant    # 付费，需要米筐账号
   auto_failover: true           # 主挂了自动切下一个
   cross_check_enabled: true     # 多源交叉验证
+  cross_check_tolerance: 0.01    # 误差阈值（1%），超过就标记不一致
 ```
 
-### 5.3 付费数据源怎么配
+### 5.3 付费数据源详细配置
 
-在 `.env` 里加对应的 token / 账号：
+#### Tushare（最推荐的付费数据源）
 
-```bash
-# Tushare（注册就送积分，够用）
-TUSHARE_TOKEN=你的tushare token
+**特点**：注册就送 100 积分，基本够用；积分越高能调的接口越多。
 
-# 聚宽 JQData
-JQDATA_USERNAME=你的聚宽账号
-JQDATA_PASSWORD=你的聚宽密码
+**怎么配**：
+1. 去 https://tushare.pro 注册账号
+2. 拿到你的 token
+3. 在 `.env` 里加：
+   ```bash
+   TUSHARE_TOKEN=你的tushare token
+   ```
+4. Web 界面勾选 Tushare 就能用
 
-# 米筐 RiceQuant
-RQDATA_USERNAME=你的米筐账号
-RQDATA_PASSWORD=你的米筐密码
+#### 聚宽 JQData
 
-# Wind / Choice / iFinD
-# 不用配，装了对应终端就能用
-```
+**特点**：量化圈子常用，数据全。
+
+**怎么配**：
+1. 去 https://www.joinquant.com 注册账号
+2. 拿到你的账号和密码
+3. 在 `.env` 里加：
+   ```bash
+   JQDATA_USERNAME=你的聚宽账号
+   JQDATA_PASSWORD=你的聚宽密码
+   ```
+4. Web 界面勾选 JQData 就能用
+
+#### 米筐 RiceQuant
+
+**特点**：跟聚宽类似，也是量化数据源。
+
+**怎么配**：
+1. 去 https://www.ricequant.com 注册账号
+2. 拿到你的账号和密码
+3. 在 `.env` 里加：
+   ```bash
+   RQDATA_USERNAME=你的米筐账号
+   RQDATA_PASSWORD=你的米筐密码
+   ```
+4. Web 界面勾选 RiceQuant 就能用
+
+#### Wind / Choice / iFinD（商业终端）
+
+**特点**：机构用的付费终端，数据最准最全，但要装对应软件。
+
+**怎么配**：
+1. 装对应终端（Wind 万得 / Choice 东方财富 / 同花顺 iFinD）
+2. 登录终端
+3. 装对应的 Python SDK（WindPy / choice-sdk / ifind-sdk）
+4. Web 界面勾选就能用（不用配 token，终端登录了就行）
 
 ### 5.4 多源交叉验证效果
 
@@ -231,6 +437,16 @@ RQDATA_PASSWORD=你的米筐密码
 ```
 
 **这就是反幻觉的终极形态**：不只校验模型生成的数字，连数据源本身的数字都校验。
+
+### 5.5 容灾切换
+
+主数据源挂了（比如 AKShare 限流），自动切下一个：
+
+```
+⚠️ AKShare 抓取失败，自动切换到新浪财经 HTTP
+```
+
+**配置**：`auto_failover: true`（默认开启）
 
 ---
 
