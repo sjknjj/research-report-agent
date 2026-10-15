@@ -171,13 +171,16 @@ class ResearchAssistant:
             from src.verify.statements import check_statements
 
             # 抓三大报表
-            balance_df = ak.stock_financial_report_sina(stock=symbol, symbol="资产负债表")
-            income_df = ak.stock_financial_report_sina(stock=symbol, symbol="利润表")
-            cashflow_df = ak.stock_financial_report_sina(stock=symbol, symbol="现金流量表")
+            try:
+                balance_df = ak.stock_financial_report_sina(stock=symbol, symbol="资产负债表")
+                income_df = ak.stock_financial_report_sina(stock=symbol, symbol="利润表")
+                cashflow_df = ak.stock_financial_report_sina(stock=symbol, symbol="现金流量表")
+            except Exception:
+                balance_df = income_df = cashflow_df = None
 
             # 取最新一期数据，转换成字典
             def _df_to_dict(df, col_map):
-                if df is None or df.empty:
+                if df is None or (hasattr(df, "empty") and df.empty):
                     return {}
                 latest = df.iloc[0]  # 第一行是最新期
                 result = {}
