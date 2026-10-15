@@ -1,4 +1,4 @@
-"""研报流水线编排器：按 规划→检索→分析→撰写→审校→(修订) 串联各智能体。"""
+"""研报流水线编排器：规划→检索→分析→多空辩论→撰写→审校→(修订)（3.0新增辩论环节）。"""
 from __future__ import annotations
 
 import time
@@ -10,6 +10,7 @@ from ..common.schema import AgentContext, ResearchReport
 from ..llm.client import LLMClient
 from ..tools.search import build_search_tool
 from .analyst import AnalystAgent
+from .debate import DebateAgent
 from .planner import PlannerAgent
 from .researcher import ResearcherAgent
 from .reviewer import ReviewerAgent
@@ -28,6 +29,7 @@ class ResearchOrchestrator:
         self.planner = PlannerAgent(self.llm, settings)
         self.researcher = ResearcherAgent(self.llm, settings)
         self.analyst = AnalystAgent(self.llm, settings)
+        self.debater = DebateAgent(self.llm, settings)   # 3.0：多空辩论
         self.writer = WriterAgent(self.llm, settings)
         self.reviewer = ReviewerAgent(self.llm, settings)
 
@@ -52,12 +54,13 @@ class ResearchOrchestrator:
         self._step("② 检索资料", self.researcher, ctx, on_step,
                    with_search=True, deep=deep)
         self._step("③ 逐章分析", self.analyst, ctx, on_step)
-        self._step("④ 撰写初稿", self.writer, ctx, on_step)
+        self._step("④ 多空辩论", self.debater, ctx, on_step)   # 3.0新增
+        self._step("⑤ 撰写初稿", self.writer, ctx, on_step)
 
         # 审校—修订闭环
         max_rounds = max(0, self.settings.max_review_rounds)
         for round_index in range(max_rounds + 1):
-            self._step(f"⑤ 审校（第{round_index + 1}轮）", self.reviewer, ctx, on_step)
+            self._step(f"⑥ 审校（第{round_index + 1}轮）", self.reviewer, ctx, on_step)
             if ctx.review and ctx.review.passed:
                 break
             if round_index >= max_rounds:

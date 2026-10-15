@@ -76,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_brief.add_argument("--start", default=None, help="行情起始 YYYYMMDD")
     p_brief.add_argument("--end", default=None, help="行情结束 YYYYMMDD")
     p_brief.add_argument("--sample", action="store_true", help="强制使用离线样例数据")
+    p_brief.add_argument("--push", action="store_true", help="3.0：生成完自动推送到飞书/企业微信")
 
     p_ann = sub.add_parser("announce", parents=[common], help="公告要点提炼")
     p_ann.add_argument("--file", default=None, help="公告文本文件路径（缺省用样例公告）")
@@ -163,7 +164,42 @@ def cmd_brief(args) -> int:
         print("已生成：", path)
     print("=" * 64)
     logger.info("公司速览完成")
+
+    # 3.0：可选推送飞书/企业微信
+    if getattr(args, "push", False):
+        _push_brief(title, result.text, v, settings)
     return 0
+
+
+def _push_brief(title: str, text: str, verification: dict, settings) -> None:
+    """3.0：把速览结果推送到飞书/企业微信（按配置自动选择渠道）。"""
+    import os
+    from src.notify import FeishuNotifier, WeComNotifier
+
+    feishu_url = os.getenv("FEISHU_WEBHOOK_URL", "")
+    wecom_key = os.getenv("WECOM_WEBHOOK_KEY", "")
+
+    if not feishu_url and not wecom_key:
+        print("推送：未配置 FEISHU_WEBHOOK_URL / WECOM_WEBHOOK_KEY，跳过")
+        return
+
+    v = verification or {}
+    summary = (
+        f"**{title}**\n\n"
+        f"- 交叉校验：{'通过' if v.get('passed') else '未通过'}"
+        f"（一致{v.get('supported', 0)}、矛盾{v.get('mismatch', 0)}）\n"
+        f"- 幻觉率：{v.get('hallucination_rate', 0):.1%}\n\n"
+        f"{text[:800]}..."
+    )
+
+    if feishu_url:
+        feishu = FeishuNotifier(feishu_url, os.getenv("FEISHU_SECRET"))
+        if feishu.send_markdown(title, summary):
+            print("已推送：飞书")
+    if wecom_key:
+        wecom = WeComNotifier(wecom_key)
+        if wecom.send_markdown(summary):
+            print("已推送：企业微信")
 
 
 def cmd_announce(args) -> int:

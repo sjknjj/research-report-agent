@@ -79,6 +79,21 @@ class ReviewResult:
 
 
 @dataclass
+class DebateResult:
+    """多空辩论结果（3.0新增）。"""
+
+    bull_points: List[str] = field(default_factory=list)     # 乐观论点
+    bear_points: List[str] = field(default_factory=list)      # 谨慎/利空论点
+    bull_rebuttal: str = ""      # 多方反驳空方
+    bear_rebuttal: str = ""      # 空方反驳多方
+    synthesis: str = ""          # 综合平衡观点
+    score: int = 0               # 多空评分（0=极度看空，10=极度看多，5=中性）
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class Reference:
     """参考文献条目。"""
 
@@ -112,6 +127,7 @@ class AgentContext:
     plan: Optional[ResearchPlan] = None
     search_results: List[SearchResult] = field(default_factory=list)
     notes: List[AnalysisNote] = field(default_factory=list)
+    debate: Optional[DebateResult] = None       # 3.0：多空辩论结果
     report: Optional[ResearchReport] = None
     review: Optional[ReviewResult] = None
     trace: List[str] = field(default_factory=list)  # 流水线执行轨迹（人类可读）

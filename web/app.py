@@ -273,6 +273,29 @@ async def api_report_stream(topic: str, deep: bool = False):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+# 3.0：MCP 端点（Model Context Protocol，JSON-RPC 2.0）
+@app.post("/mcp")
+def mcp_endpoint(request: dict):
+    """MCP 标准接口：Claude Desktop / Cursor 可直接接入。
+
+    示例调用：
+        curl -X POST http://localhost:8000/mcp \\
+          -H "Content-Type: application/json" \\
+          -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+    """
+    from src.mcp.server import MCPServer
+    settings = load_settings()
+    server = MCPServer(settings)
+    return server.handle(request)
+
+
+@app.get("/mcp/tools")
+def mcp_tools_info():
+    """浏览器直接查看 MCP 暴露的工具列表。"""
+    from src.mcp.server import TOOLS_DECLARATION
+    return {"mcp_version": "1.0", "tools": TOOLS_DECLARATION}
+
+
 def main():
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

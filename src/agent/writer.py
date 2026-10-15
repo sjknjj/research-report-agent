@@ -69,6 +69,12 @@ class WriterAgent(BaseAgent):
                     citations=sorted(set(note.citation_indexes)),
                 )
 
+        # 3.0：在正文最前面插入「速览仪表盘」章节
+        if ctx.debate is not None:
+            sections.insert(0, self._render_dashboard(ctx.debate))
+            # 3.0：在正文最后追加「多空对照」章节（来自辩论结果）
+            sections.append(self._render_debate_section(ctx.debate))
+
         references = [
             Reference(index=i, title=r.title, url=r.url, source=r.source)
             for i, r in enumerate(ctx.search_results, start=1)
@@ -87,7 +93,73 @@ class WriterAgent(BaseAgent):
                 "model": self.settings.llm_model,
                 "source_count": len(ctx.search_results),
                 "revised": bool(extra_instruction),
+                "debate_score": ctx.debate.score if ctx.debate else None,
             },
+        )
+
+    @staticmethod
+    def _render_debate_section(debate) -> ReportSection:
+        """3.0：把多空辩论结果渲染成一个对照章节。"""
+        lines = [
+            "| 维度 | 乐观观点（多方） | 谨慎观点（空方） |",
+            "| --- | --- | --- |",
+        ]
+        max_len = max(len(debate.bull_points), len(debate.bear_points))
+        for i in range(max_len):
+            bull = debate.bull_points[i] if i < len(debate.bull_points) else "—"
+            bear = debate.bear_points[i] if i < len(debate.bear_points) else "—"
+            lines.append(f"| 论点 {i+1} | {bull} | {bear} |")
+
+        content = "\n".join(lines) + "\n\n"
+        if debate.rebuttal:
+            content += f"**多方反驳**：{debate.rebuttal}\n\n"
+        if debate.synthesis:
+            content += f"**综合判断**：{debate.synthesis}\n\n"
+        content += f"**多空评分**：{debate.score}/10（5为中性）"
+
+        return ReportSection(
+            heading="多空对照与综合判断",
+            content=content,
+            citations=[],
+        )
+
+    @staticmethod
+    def _render_dashboard(debate) -> ReportSection:
+        """3.0：生成报告开头的「速览仪表盘」——一眼能看到核心结论。"""
+        score = debate.score
+        # 评分对应的文字标签
+        if score >= 8:
+            verdict = "强烈偏多"
+        elif score >= 6:
+            verdict = "偏多"
+        elif score >= 4:
+            verdict = "中性"
+        elif score >= 2:
+            verdict = "偏空"
+        else:
+            verdict = "强烈偏空"
+
+        bull_top = debate.bull_points[:3] or ["—"]
+        bear_top = debate.bear_points[:3] or ["—"]
+
+        lines = [
+            f"| 项目 | 内容 |",
+            f"| --- | --- |",
+            f"| **多空评分** | **{score}/10**（{verdict}） |",
+            f"| **综合判断** | {debate.synthesis or '详见下文分析'} |",
+        ]
+        content = "\n".join(lines) + "\n\n"
+        content += "**核心驱动（多方）**：\n"
+        for p in bull_top:
+            content += f"- {p}\n"
+        content += "\n**主要风险（空方）**：\n"
+        for p in bear_top:
+            content += f"- {p}\n"
+
+        return ReportSection(
+            heading="速览仪表盘",
+            content=content,
+            citations=[],
         )
 
     def _write_abstract(
