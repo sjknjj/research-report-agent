@@ -135,10 +135,13 @@
 | 功能 | 说明 |
 |---|---|
 | **MCP Server** | 遵循 Model Context Protocol，可被 Claude Desktop / Cursor 直接接入 |
-| **FastAPI Web 服务** | 自带前端页面，三个 Tab（公司速览/深度研报/自选股） |
+| **FastAPI Web 服务** | 自带前端页面，**9 个 Tab**（首页/多公司对比/深度研报/公告提炼/情绪面/回测/因子/统计/自选股） |
 | **RAG 向量检索** | 本地向量库 + 余弦相似度，生成报告前自动检索历史相似案例 |
 | **多 LLM 支持** | 一键切换 OpenAI / DeepSeek / 通义千问 / 智谱等 |
 | **离线样例模式** | 不配密钥也能跑，用样例数据走通流程 |
+| **搜索引擎** | 百度 / 必应 / DuckDuckGo / Tavily，国内推荐用百度不用配 key |
+| **Docker 一键部署** | Dockerfile + docker-compose.yml，不用装 Python 一条命令跑起来 |
+| **PDF 导出** | 报告一键导出 PDF（中文排版），Web 界面点按钮直接下载 |
 
 ---
 
