@@ -51,7 +51,7 @@ from src.services.research_assistant import ResearchAssistant  # noqa: E402
 from src.verify.facts import FactBase  # noqa: E402
 from src.verify.verifier import CrossVerifier  # noqa: E402
 
-_COMMANDS = {"brief", "announce", "industry", "report", "compare", "demo", "serve"}
+_COMMANDS = {"brief", "announce", "industry", "report", "compare", "demo", "serve", "daily"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -100,6 +100,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("demo", parents=[common], help="一键离线案例 + 反幻觉演示")
     sub.add_parser("serve", parents=[common], help="启动 FastAPI Web 界面（端口 8000）")
+
+    p_daily = sub.add_parser("daily", parents=[common], help="自选股批量跑 + 推送（配合 GitHub Actions 定时）")
+    p_daily.add_argument("--file", default="watchlist.txt", help="自选股列表文件路径")
+    p_daily.add_argument("--push", action="store_true", default=True, help="生成完自动推送（默认开启）")
     return parser
 
 
@@ -342,6 +346,56 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def cmd_daily(args) -> int:
+    """自选股批量跑 + 推送（配合 GitHub Actions 定时任务使用）。"""
+    logger = get_logger("cli.daily")
+    settings = _settings(args)
+
+    # 读取自选股列表
+    watchlist_file = Path(args.file)
+    if not watchlist_file.exists():
+        print(f"自选股列表文件不存在：{watchlist_file}")
+        return 1
+
+    symbols = []
+    for line in watchlist_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            symbols.append(line)
+
+    if not symbols:
+        print("自选股列表为空，请在 watchlist.txt 里添加股票代码")
+        return 1
+
+    print(f"开始批量处理 {len(symbols)} 只自选股：{', '.join(symbols)}")
+    print("=" * 64)
+
+    ra = ResearchAssistant(settings)
+    success, fail = 0, 0
+
+    for symbol in symbols:
+        try:
+            print(f"\n[{symbol}] 处理中...")
+            result = ra.company_brief(symbol, prefer_live=True)
+            v = result.verification or {}
+
+            # 推送
+            if args.push:
+                _push_brief(f"{symbol} 投研速览", result.text, v, settings)
+
+            status = "通过" if v.get("passed") else "未通过"
+            print(f"[{symbol}] 完成：校验{status}，幻觉率 {v.get('hallucination_rate', 0):.1%}")
+            success += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{symbol}] 失败：{exc}")
+            logger.warning("处理 %s 失败：%s", symbol, exc)
+            fail += 1
+
+    print("\n" + "=" * 64)
+    print(f"批量任务完成：成功 {success}，失败 {fail}")
+    return 0 if fail == 0 else 1
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # 向后兼容：未写子命令时，默认按 report 处理
@@ -362,6 +416,7 @@ def main(argv=None) -> int:
         "compare": cmd_compare,
         "demo": cmd_demo,
         "serve": cmd_serve,
+        "daily": cmd_daily,
     }
     try:
         return handlers[args.command](args)

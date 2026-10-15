@@ -1,0 +1,47 @@
+# 每日自选股报告自动生成 + 推送
+# 工作日早上 9:00（北京时间）自动运行
+name: 每日自选股报告
+
+on:
+  schedule:
+    # UTC 01:00 = 北京时间 09:00
+    - cron: '0 1 * * 1-5'
+  workflow_dispatch:  # 支持手动触发
+
+jobs:
+  daily-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: |
+          pip install -r requirements.txt
+          pip install akshare pandas numpy requests
+
+      - name: 配置环境变量
+        run: |
+          cat > .env << EOF
+          LLM_BASE_URL=${{ secrets.LLM_BASE_URL }}
+          LLM_API_KEY=${{ secrets.LLM_API_KEY }}
+          LLM_MODEL=${{ secrets.LLM_MODEL }}
+          FEISHU_WEBHOOK_URL=${{ secrets.FEISHU_WEBHOOK_URL }}
+          FEISHU_SECRET=${{ secrets.FEISHU_SECRET }}
+          WECOM_WEBHOOK_KEY=${{ secrets.WECOM_WEBHOOK_KEY }}
+          OUTPUT_DIR=output
+          EOF
+
+      - name: 运行每日自选股报告
+        run: python main.py daily --file watchlist.txt --push
+
+      - name: 上传生成的报告
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-reports
+          path: output/
+          retention-days: 7

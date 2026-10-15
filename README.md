@@ -235,6 +235,121 @@ python main.py serve                                      # 默认 http://127.0.
 
 产物默认输出到 `output/`，同时生成 Markdown 与自包含 HTML（含交叉校验表与事实包附录）。
 
+---
+
+## 🖥️ 方式一：Web 界面使用（最直观，推荐新手）
+
+```bash
+python main.py serve
+```
+
+浏览器打开 http://localhost:8000 ，你会看到三个 Tab：
+
+| Tab | 功能 | 说明 |
+|---|---|---|
+| **📊 公司速览** | 输入股票代码 → 一键生成速览 | 含行情、财务、技术面、交叉校验反幻觉 |
+| **📝 深度研报** | 输入研究主题 → 多智能体流水线生成 | SSE 实时显示进度（规划→检索→分析→辩论→撰写→审校） |
+| **⭐ 我的自选股** | 浏览器本地存储自选股列表 | 点击股票代码快速生成速览，不用每次输入代码 |
+
+**特点**：零命令操作、实时进度条、自选股本地保存，适合日常快速看盘。
+
+---
+
+## 📬 方式二：每日自选股自动推送（最省心，推荐进阶用户）
+
+配一次之后，**每天自动收到飞书/企业微信通知**，不用打开任何页面。
+
+### 第一步：配置推送渠道
+
+在飞书/企业微信群里添加自定义机器人，拿到 webhook 地址，填到 `.env`：
+
+```bash
+# 飞书自定义机器人
+FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxx
+FEISHU_SECRET=你的签名密钥（可选）
+
+# 企业微信机器人（二选一）
+WECOM_WEBHOOK_KEY=你的webhook key
+```
+
+### 第二步：编辑自选股列表
+
+打开 `watchlist.txt`，一行一个股票代码：
+
+```
+600519
+000858
+300750
+601318
+```
+
+### 第三步：手动跑一次测试
+
+```bash
+python main.py daily
+```
+
+每只股票会自动生成速览并推送到群里。
+
+### 第四步：GitHub Actions 定时自动跑（推荐）
+
+1. 把代码推到你的 GitHub 仓库
+2. 在仓库 Settings → Secrets 里添加：
+   - `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`
+   - `FEISHU_WEBHOOK_URL`、`FEISHU_SECRET`（或 WECOM_WEBHOOK_KEY）
+3. 已经配好的 `.github/workflows/daily-report.yml` 会在**每个工作日早上 9 点（北京时间）**自动运行
+4. 也可以在 Actions 页面手动触发运行
+
+**效果**：每天早上打开微信，直接收到自选股分析卡片，零操作。
+
+---
+
+## 🔌 方式三：MCP 接入 Claude Desktop / Cursor（最极客）
+
+本项目暴露了标准 MCP（Model Context Protocol）接口，你可以在 Claude Desktop / Cursor 里直接用自然语言调用：
+
+> "帮我分析一下茅台现在怎么样"
+> "校验一下这段文字里的财务数字对不对"
+
+### 暴露的 3 个 MCP 工具
+
+| 工具名 | 功能 | 输入 |
+|---|---|---|
+| `get_stock_brief` | 获取 A 股公司投研速览 | 股票代码（如 600519） |
+| `verify_numbers` | 数字反幻觉校验 | 待校验文本 + 股票代码 |
+| `generate_stock_report` | 生成完整深度研报 | 研究主题 |
+
+### 接入 Claude Desktop 步骤
+
+1. 先启动本项目的 Web 服务：`python main.py serve`
+2. 找到 Claude Desktop 的配置文件：
+   - Mac: `~/Library/Application Support/Claude/claude_desktop_config.json`
+   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+3. 加入以下配置：
+
+```json
+{
+  "mcpServers": {
+    "research-report-agent": {
+      "url": "http://localhost:8000/mcp"
+    }
+  }
+}
+```
+
+4. 重启 Claude Desktop，就可以直接说"帮我分析下600519"了
+
+### 接入 Cursor 步骤
+
+1. 同样先启动 Web 服务
+2. Cursor 设置 → Features → MCP → Add Server
+3. URL 填 `http://localhost:8000/mcp`
+4. 保存后即可在 Cursor 对话中调用
+
+> **说明**：MCP 接口基于 HTTP + JSON-RPC 2.0，兼容大多数支持 MCP 的客户端。
+
+---
+
 ## 三、案例演示（`examples/`）
 
 | 脚本 | 演示内容 |
