@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Optional
+from typing import List
 
 from ..common.schema import (
     AgentContext,
@@ -29,7 +29,7 @@ class WriterAgent(BaseAgent):
     role_name = "writer"
     MAX_WORKERS = 4  # 3.0：并行撰写的章节数上限
 
-    def run(self, ctx: AgentContext, search_tool=None) -> None:
+    def run(self, ctx: AgentContext) -> None:
         ctx.report = self._compose(ctx)
         ctx.log("[writer] 完成报告初稿撰写")
 
@@ -43,7 +43,6 @@ class WriterAgent(BaseAgent):
     # ------------------------------------------------------------------
     def _compose(self, ctx: AgentContext, extra_instruction: str = "") -> ResearchReport:
         plan, notes = ctx.plan, ctx.notes
-        headings = [n.heading for n in notes]
 
         abstract = self._write_abstract(ctx.topic, notes, extra_instruction)
 
@@ -60,6 +59,8 @@ class WriterAgent(BaseAgent):
                 try:
                     content = fut.result()
                 except Exception as exc:  # noqa: BLE001
+                    # 认证/配置类错误不能被章节级兜底吞掉
+                    self._raise_if_fatal(exc)
                     self.logger.warning("章节「%s」撰写失败，使用要点兜底：%s", note.heading, exc)
                     content = "\n".join(f"- {b}" for b in note.bullet_points)
                 sections[idx] = ReportSection(
@@ -74,8 +75,8 @@ class WriterAgent(BaseAgent):
             # 3.0：在正文最后追加「多空对照」章节（来自辩论结果）
             sections.append(self._render_debate_section(ctx.debate))
 
-        # 3.5：在报告最后加「反幻觉总览」章节
-        sections.append(self._render_anti_hallucination(ctx))
+        # 3.5：在报告最后加「反幻觉总览」章节（由真实执行过的校验驱动）
+        sections.append(self.render_anti_hallucination(ctx))
 
         references = [
             Reference(index=i, title=r.title, url=r.url, source=r.source)
@@ -96,12 +97,13 @@ class WriterAgent(BaseAgent):
                 "source_count": len(ctx.search_results),
                 "revised": bool(extra_instruction),
                 "debate_score": ctx.debate.score if ctx.debate else None,
+                "checks": {k: v.to_dict() for k, v in ctx.checks.items()},
             },
         )
 
     @staticmethod
     def _render_debate_section(debate) -> ReportSection:
-        """3.0：把多空辩论结果渲染成一个对照章节。"""
+        """3.0：把多空辩论结果渲染成一个对照章节（多空双方的论点与反驳都渲染）。"""
         lines = [
             "| 维度 | 乐观观点（多方） | 谨慎观点（空方） |",
             "| --- | --- | --- |",
@@ -113,8 +115,10 @@ class WriterAgent(BaseAgent):
             lines.append(f"| 论点 {i+1} | {bull} | {bear} |")
 
         content = "\n".join(lines) + "\n\n"
-        if debate.rebuttal:
-            content += f"**多方反驳**：{debate.rebuttal}\n\n"
+        if debate.bull_rebuttal:
+            content += f"**多方反驳（针对空方）**：{debate.bull_rebuttal}\n\n"
+        if debate.bear_rebuttal:
+            content += f"**空方反驳（针对多方）**：{debate.bear_rebuttal}\n\n"
         if debate.synthesis:
             content += f"**综合判断**：{debate.synthesis}\n\n"
         content += f"**多空评分**：{debate.score}/10（5为中性）"
@@ -141,12 +145,14 @@ class WriterAgent(BaseAgent):
         else:
             verdict = "强烈偏空"
 
-        bull_top = debate.bull_points[:3] or ["—"]
-        bear_top = debate.bear_points[:3] or ["—"]
+        # 论点为空的概率很低（离线兜底也会给出占位论点），
+        # 万一为空也要显式说明，不能用 "—" 糊弄读者。
+        bull_top = debate.bull_points[:3] or ["（本轮未提炼出多方论点，需人工复核）"]
+        bear_top = debate.bear_points[:3] or ["（本轮未提炼出空方论点，需人工补充风险分析）"]
 
         lines = [
-            f"| 项目 | 内容 |",
-            f"| --- | --- |",
+            "| 项目 | 内容 |",
+            "| --- | --- |",
             f"| **多空评分** | **{score}/10**（{verdict}） |",
             f"| **综合判断** | {debate.synthesis or '详见下文分析'} |",
         ]
@@ -164,30 +170,113 @@ class WriterAgent(BaseAgent):
             citations=[],
         )
 
-    @staticmethod
-    def _render_anti_hallucination(ctx) -> ReportSection:
-        """3.5：报告结尾的反幻觉总览——一眼看出这份报告靠不靠谱。"""
-        # 可信度等级（默认A，因为我们三道防线都开着）
-        confidence = "A（高可信）"
+    # -- 反幻觉总览：只陈述真实执行过的校验 ---------------------------------
+    # 下列校验属于“输入锁定 / 数字逐条校验 / 语义一致性 / 三表勾稽”，
+    # 只有投研助手（公司速览）路径才会真正执行；主题研报没有标的公司事实库，
+    # 因此在本路径下必须如实标注“未启用”并说明原因，绝不能盖可信度章。
+    _DISABLED_CHECKS = {
+        "input_constraint": (
+            "第一道：输入约束（数字白名单）",
+            "大模型只能使用已核实事实库中的数字。",
+            "主题研报没有标的公司的已核实事实库（FactBase），无法把可用数字锁定为白名单。",
+        ),
+        "numeric_verify": (
+            "第二道：数字校验（逐条比对真实数据）",
+            "生成后提取报告中的数字，与真实数据逐条比对。",
+            "主题研报没有标的公司事实库，无法逐条比对报告中的数字；该防线仅在投研助手公司速览路径启用。",
+        ),
+        "semantic_check": (
+            "第三道：语义一致性校验",
+            "检查定性判断/因果归因是否有事实包支撑。",
+            "语义校验依赖事实包，仅在投研助手公司速览路径启用，本路径未执行。",
+        ),
+        "statements": (
+            "附加：三大报表勾稽",
+            "核对资产=负债+权益、净利润勾稽、现金流勾稽等会计恒等式。",
+            "主题研报不含标的公司三大报表数据，未做勾稽校验。",
+        ),
+    }
+
+    def _ensure_disabled_checks(self, ctx: AgentContext) -> None:
+        """登记本路径下确实未执行的校验项（含未执行原因）。"""
+        for key, (name, description, reason) in self._DISABLED_CHECKS.items():
+            if key not in ctx.checks:
+                ctx.mark_check(
+                    key, name, executed=False, detail=description, reason=reason
+                )
+
+    def render_anti_hallucination(self, ctx: AgentContext) -> ReportSection:
+        """3.5：报告结尾的反幻觉总览——只依据 ctx 中真实执行过的校验。"""
+        self._ensure_disabled_checks(ctx)
+        checks = list(ctx.checks.values())
+
+        # 可信度必须由真实执行过的“数字类”校验决定：
+        # 数字校验没跑，就没有资格给可信度评级。
+        numeric_executed = any(
+            c.executed for c in checks if c.key in ("numeric_verify", "input_constraint")
+        )
+        failed = [c for c in checks if c.executed and c.passed is False]
+
+        if not numeric_executed:
+            confidence = "未评级"
+            confidence_note = (
+                "数字校验未启用（本路径为行业/主题研报，没有标的公司的已核实事实库），"
+                "因此不给出可信度等级。"
+            )
+        elif failed:
+            confidence = "C（存在未通过校验项）"
+            confidence_note = "部分校验未通过：" + "；".join(c.name for c in failed)
+        else:
+            confidence = "B（结构与引用校验通过，数字校验已执行且通过）"
+            confidence_note = "数字校验已实际执行并通过。"
 
         lines = [
-            "| 防线 | 说明 | 状态 |",
+            "| 防线/校验 | 说明 | 状态 |",
             "| --- | --- | --- |",
-            "| **第一道：输入约束** | 大模型只能使用 FactBase 里已核实的数字，不能自己编 | ✅ 已启用 |",
-            "| **第二道：数字校验** | 生成后自动提取所有数字，和真实数据逐条比对 | ✅ 已启用 |",
-            "| **第三道：逻辑审校** | 检查前后结论有没有自相矛盾，每个判断有没有数据支撑 | ✅ 已启用 |",
-            "| **引用溯源** | 关键数字自动标注来源（报告期/财报） | ✅ 已启用 |",
-            "",
-            f"**本报告可信度：{confidence}**（幻觉率 < 5%）",
-            "",
-            "> 本报告由反幻觉投研 Agent 生成，经过三道防线校验，最大限度减少AI编造数据的问题。",
         ]
-
+        for record in checks:
+            lines.append(
+                f"| **{record.name}** | {record.detail or record.reason or '—'} | "
+                f"{self._render_check_status(record)} |"
+            )
+        lines += [
+            "",
+            f"**本报告可信度：{confidence}**",
+            "",
+            f"> {confidence_note}",
+            "> 本总览仅陈述本轮真实执行过的校验；标为“未启用”的项目未参与本次生成，"
+            "不得据此推断报告可信度。",
+        ]
         return ReportSection(
             heading="🛡️ 反幻觉总览",
             content="\n".join(lines),
             citations=[],
         )
+
+    @staticmethod
+    def _render_check_status(record) -> str:
+        if not record.executed:
+            return f"⚪ 未启用（{record.reason or '未说明原因'}）"
+        if record.passed is True:
+            detail = f"：{record.detail}" if record.detail else ""
+            return f"✅ 已执行（通过{detail}）"
+        if record.passed is False:
+            return "❌ 已执行（未通过）"
+        detail = record.detail if record.detail else "信息性检查"
+        return f"✅ 已执行（{detail}）"
+
+    def refresh_checks(self, ctx: AgentContext) -> None:
+        """审校完成后用最新的真实校验记录刷新「反幻觉总览」章节。"""
+        if ctx.report is None:
+            return
+        section = self.render_anti_hallucination(ctx)
+        for index, existing in enumerate(ctx.report.sections):
+            if existing.heading == section.heading:
+                ctx.report.sections[index] = section
+                break
+        else:
+            ctx.report.sections.append(section)
+        ctx.report.meta["checks"] = {k: v.to_dict() for k, v in ctx.checks.items()}
 
     def _write_abstract(
         self, topic: str, notes: List[AnalysisNote], extra: str

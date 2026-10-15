@@ -8,6 +8,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
+# 由流水线自动生成、并非来自检索证据的章节标题：
+# 统计引用覆盖率时必须排除，否则永远无法达标（人为制造“不能通过”的审校）。
+AUTO_SECTION_HEADINGS = ("速览仪表盘", "多空对照与综合判断", "🛡️ 反幻觉总览")
+
 
 @dataclass
 class SearchResult:
@@ -120,6 +124,27 @@ class ResearchReport:
 
 
 @dataclass
+class CheckRecord:
+    """流水线中某一项校验/防线的真实执行记录。
+
+    反幻觉总览必须由这里的真实记录驱动：
+    - ``executed=True`` 才允许对外声明“已启用”；
+    - ``executed=False`` 时必须填写 ``reason``，说明为什么没跑，
+      报告中要如实标注“未启用”，不得伪造可信度。
+    """
+
+    key: str                       # 校验项标识
+    name: str                      # 面向读者的名称
+    executed: bool = False         # 本轮是否真的执行过
+    passed: Optional[bool] = None  # 执行结果；None 表示“信息性检查”（如覆盖率）
+    detail: str = ""               # 执行细节（覆盖率、评分等）
+    reason: str = ""               # 未执行原因（executed=False 时必填）
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class AgentContext:
     """在整条智能体流水线中共享的上下文对象。"""
 
@@ -130,7 +155,30 @@ class AgentContext:
     debate: Optional[DebateResult] = None       # 3.0：多空辩论结果
     report: Optional[ResearchReport] = None
     review: Optional[ReviewResult] = None
+    checks: Dict[str, CheckRecord] = field(default_factory=dict)  # 真实执行过的校验记录
     trace: List[str] = field(default_factory=list)  # 流水线执行轨迹（人类可读）
 
     def log(self, message: str) -> None:
         self.trace.append(message)
+
+    def mark_check(
+        self,
+        key: str,
+        name: str,
+        *,
+        executed: bool,
+        passed: Optional[bool] = None,
+        detail: str = "",
+        reason: str = "",
+    ) -> CheckRecord:
+        """登记一项校验的真实执行状态（未执行必须给出原因）。"""
+        record = CheckRecord(
+            key=key,
+            name=name,
+            executed=executed,
+            passed=passed,
+            detail=detail,
+            reason=reason,
+        )
+        self.checks[key] = record
+        return record

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -20,13 +21,14 @@ import pandas as pd
 from ..analysis.chain import chain_to_text, find_chain
 from ..analysis.chain_viz import chain_graph_html
 from ..common.logger import get_logger
-from ..data.data_service import CompanyBundle, DataService
+from ..data.data_service import DataService
 from ..data.sources import DataSourceError
-from ..llm.client import LLMClient
+from ..llm.client import LLMClient, LLMError
 from ..rag.vector_store import VectorStore
 from ..verify.facts import FactBase
 from ..verify.semantic_check import SemanticChecker
-from ..verify.verifier import CrossVerifier, VerificationReport
+from ..verify.statements import check_statements
+from ..verify.verifier import CrossVerifier
 
 logger = get_logger("services.assistant")
 
@@ -69,15 +71,36 @@ class ResearchAssistant:
     ):
         self.settings = settings
         self.llm = LLMClient(settings)
-        self.data = data_service or DataService()
+        # 用户显式勾选的数据源（Web 首页 / 配置）必须真正生效：
+        # 之前 self.sources 只是被保存下来、从未被读取，多选等于摆设。
+        self.sources = [s for s in (sources or []) if s]
+        if data_service is not None:
+            self.data = data_service
+        else:
+            manager = None
+            if self.sources:
+                from types import SimpleNamespace
+
+                from ..data.manager import build_manager_from_settings
+
+                # 把勾选的数据源包成 settings 形状，交给工厂函数构造数据源实例
+                cfg = SimpleNamespace(
+                    data_sources=self.sources,
+                    cross_check_enabled=getattr(settings, "cross_check_enabled", True),
+                    auto_failover=getattr(settings, "auto_failover", True),
+                )
+                try:
+                    manager = build_manager_from_settings(cfg)
+                except Exception as exc:  # noqa: BLE001 - 构造失败时退回单源
+                    logger.warning("多数据源管理器构造失败，退回单数据源：%s", exc)
+                    manager = None
+            self.data = DataService(manager=manager, settings=settings)
         self.verifier = verifier or CrossVerifier()
         self.semantic = SemanticChecker(self.llm)
         self.repair_rounds = max(0, settings.max_review_rounds)
         self.vector_store = VectorStore(
             persist_path=os.path.join(os.path.dirname(__file__), "..", "..", "data", "rag_index.json")
         )
-        # v3.7：用户选中的数据源列表（默认只用 akshare）
-        self.sources = sources or ["akshare"]
 
     # ------------------------------------------------------------------
     def company_brief(
@@ -138,22 +161,35 @@ class ResearchAssistant:
                     + "\n".join(f"- {c['claim']}（{c['reason']}）"
                                 for c in semantic_report.unsupported[:5])
                 )
-                repaired = self.llm.chat(
-                    messages + [
-                        {"role": "assistant", "content": final_text},
-                        {"role": "user", "content": gap_msg},
-                    ],
-                    stage="company_brief",
-                    context=context,
-                    temperature=0.2,
-                )
-                # 重写后再跑一次数字校验，确保没引入新数字错误
-                recheck = self.verifier.verify(repaired, fact_base)
-                if recheck.n_mismatch == 0:
-                    final_text = repaired
-                    logger.info("语义重写完成，数字复核通过")
+                try:
+                    repaired = self.llm.chat(
+                        messages + [
+                            {"role": "assistant", "content": final_text},
+                            {"role": "user", "content": gap_msg},
+                        ],
+                        stage="company_brief",
+                        context=context,
+                        temperature=0.2,
+                    )
+                except LLMError as exc:
+                    # 重写失败不能静默丢弃：保留原稿，但明确记录未采纳重写
+                    logger.warning("语义重写调用失败，保留原稿：%s", exc)
+                    repaired = ""
+                if repaired:
+                    # 重写后再跑一次数字校验，确保没引入新数字错误；
+                    # 只有复核通过才采纳，并把 verification 换成重写后的结果。
+                    recheck = self.verifier.verify(repaired, fact_base)
+                    if recheck.n_mismatch == 0:
+                        final_text = repaired
+                        verification = recheck
+                        logger.info("语义重写完成，数字复核通过并已采纳")
+                    else:
+                        logger.warning(
+                            "语义重写后数字复核未通过（%d 处矛盾），未采纳重写，保留原稿",
+                            recheck.n_mismatch,
+                        )
 
-        # 把本次报告存入向量库，供后续 RAG 检索
+        # 把本次报告存入向量库，供后续 RAG 检索（失败不影响主流程，但必须留痕）
         try:
             self.vector_store.add(
                 text=final_text[:2000],
@@ -161,71 +197,96 @@ class ResearchAssistant:
                 metadata={"symbol": bundle.symbol, "name": bundle.name},
             )
             self.vector_store.save()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("向量库写入/保存失败（不影响主流程）：%s", exc)
 
         # 三大报表勾稽校验（v3.8新增）
         statements_report = None
-        try:
-            import akshare as ak
-            from src.verify.statements import check_statements
-
-            # 抓三大报表
+        statements_error = ""
+        statements_skipped = self.settings.effective_mode == "offline"
+        if statements_skipped:
+            # 离线模式必须直接跳过：不发网络请求，也不伪造结果
+            logger.info("离线模式跳过三大报表勾稽校验（不发起网络请求）")
+        else:
             try:
-                balance_df = ak.stock_financial_report_sina(stock=symbol, symbol="资产负债表")
-                income_df = ak.stock_financial_report_sina(stock=symbol, symbol="利润表")
-                cashflow_df = ak.stock_financial_report_sina(stock=symbol, symbol="现金流量表")
-            except Exception:
-                balance_df = income_df = cashflow_df = None
+                import akshare as ak
 
-            # 取最新一期数据，转换成字典
-            def _df_to_dict(df, col_map):
-                if df is None or (hasattr(df, "empty") and df.empty):
-                    return {}
-                latest = df.iloc[0]  # 第一行是最新期
-                result = {}
-                for cn_name, en_name in col_map.items():
-                    if cn_name in latest.index:
-                        val = latest[cn_name]
-                        try:
-                            result[en_name] = float(val)
-                        except (ValueError, TypeError):
-                            pass
-                return result
+                # 新浪财报接口需要 sh600519 / sz000858 形式，传纯 6 位数字必然失败
+                sina_symbol = self._to_sina_symbol(symbol)
+                logger.info("三大报表勾稽：标的 %s → %s", symbol, sina_symbol)
 
-            balance = _df_to_dict(balance_df, {
-                "资产总计": "total_assets",
-                "负债合计": "total_liabilities",
-                "所有者权益(或股东权益)合计": "total_equity",
-            })
-            income = _df_to_dict(income_df, {
-                "营业收入": "revenue",
-                "营业总成本": "operating_cost",
-                "营业利润": "operating_profit",
-                "利润总额": "total_profit",
-                "所得税费用": "income_tax",
-                "净利润": "net_profit",
-            })
-            cashflow = _df_to_dict(cashflow_df, {
-                "期初现金及现金等价物余额": "begin_cash",
-                "期末现金及现金等价物余额": "end_cash",
-                "经营活动产生的现金流量净额": "net_op_cash",
-                "投资活动产生的现金流量净额": "net_inv_cash",
-                "筹资活动产生的现金流量净额": "net_fin_cash",
-            })
+                # 三张表分别抓取，单张失败不影响其它两张
+                frames: Dict[str, Any] = {}
+                for attr, table_name in (
+                    ("balance", "资产负债表"),
+                    ("income", "利润表"),
+                    ("cashflow", "现金流量表"),
+                ):
+                    try:
+                        frames[attr] = ak.stock_financial_report_sina(
+                            stock=sina_symbol, symbol=table_name
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        frames[attr] = None
+                        logger.warning("抓取%s失败（%s）：%s", table_name, sina_symbol, exc)
 
-            statements_report = check_statements(balance=balance, income=income, cashflow=cashflow)
+                def _df_to_dict(df, col_map):
+                    if df is None or (hasattr(df, "empty") and df.empty):
+                        return {}
+                    latest = df.iloc[0]  # 第一行是最新期
+                    result = {}
+                    for cn_name, en_name in col_map.items():
+                        if cn_name in latest.index:
+                            val = latest[cn_name]
+                            try:
+                                result[en_name] = float(val)
+                            except (ValueError, TypeError):
+                                pass
+                    return result
 
-            # 把勾稽结果加到报告末尾
-            if statements_report.items:
-                st_text = "\n\n---\n\n📋 **三大报表勾稽校验**\n\n"
-                st_text += f"勾稽结论：{'✅ 通过' if statements_report.passed else '⚠️ 未通过'}\n\n"
-                for item in statements_report.items:
-                    icon = "✅" if item.passed else "❌"
-                    st_text += f"- {icon} **{item.name}**：{item.detail}\n"
-                final_text = final_text + st_text
-        except Exception as exc:
-            logger.warning("三大报表勾稽校验失败（不影响主流程）：%s", exc)
+                balance = _df_to_dict(frames.get("balance"), {
+                    "资产总计": "total_assets",
+                    "负债合计": "total_liabilities",
+                    "所有者权益(或股东权益)合计": "total_equity",
+                })
+                income = _df_to_dict(frames.get("income"), {
+                    "营业收入": "revenue",
+                    "营业总成本": "operating_cost",
+                    "营业利润": "operating_profit",
+                    "利润总额": "total_profit",
+                    "所得税费用": "income_tax",
+                    "净利润": "net_profit",
+                })
+                cashflow = _df_to_dict(frames.get("cashflow"), {
+                    "期初现金及现金等价物余额": "begin_cash",
+                    "期末现金及现金等价物余额": "end_cash",
+                    "经营活动产生的现金流量净额": "net_op_cash",
+                    "投资活动产生的现金流量净额": "net_inv_cash",
+                    "筹资活动产生的现金流量净额": "net_fin_cash",
+                })
+
+                statements_report = check_statements(
+                    balance=balance, income=income, cashflow=cashflow
+                )
+
+                # 把勾稽结果加到报告末尾
+                if statements_report.items:
+                    st_text = "\n\n---\n\n📋 **三大报表勾稽校验**\n\n"
+                    st_text += f"勾稽结论：{'✅ 通过' if statements_report.passed else '⚠️ 未通过'}\n\n"
+                    for item in statements_report.items:
+                        # 缺科目的跳过项不是"不通过"，用 ⚪ 区分，避免误导
+                        if not getattr(item, "checked", True):
+                            icon = "⚪"
+                        else:
+                            icon = "✅" if item.passed else "❌"
+                        st_text += f"- {icon} **{item.name}**：{item.detail}\n"
+                    final_text = final_text + st_text
+                else:
+                    statements_error = "接口返回的报表未包含可校验科目"
+                    logger.warning("三大报表勾稽：%s", statements_error)
+            except Exception as exc:  # noqa: BLE001
+                statements_error = str(exc)
+                logger.warning("三大报表勾稽校验失败（不影响主流程）：%s", exc)
 
         return AssistantResult(
             text=final_text,
@@ -239,6 +300,8 @@ class ResearchAssistant:
                 "chain_graph": chain_graph_html(chain_info, bundle.symbol) if chain_info else "",
                 "technicals": bundle.technicals,
                 "statements": statements_report.to_dict() if statements_report else None,
+                "statements_skipped": statements_skipped,
+                "statements_error": statements_error or None,
             },
         )
 
@@ -277,6 +340,8 @@ class ResearchAssistant:
                 logger.info("公告数字与财报交叉校验：%s", report.render_text().splitlines()[0])
             except DataSourceError as exc:
                 logger.info("公告交叉校验跳过（无数据包）：%s", exc)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("公告交叉校验失败（不影响公告摘要）：%s", exc)
 
         return AssistantResult(text=text, verification=verification, bundle=bundle_dict)
 
@@ -337,6 +402,27 @@ class ResearchAssistant:
         return best_text, best_report
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _to_sina_symbol(symbol: str) -> str:
+        """把纯 6 位 A 股代码转成新浪财经需要的带交易所前缀形式。
+
+        新浪 ``stock_financial_report_sina`` 要求 ``sh600519`` / ``sz000858``，
+        直接传 ``600519`` 会必然失败（历史上被静默吞掉）。
+        """
+        text = str(symbol or "").strip().lower()
+        if text.startswith(("sh", "sz", "bj")):
+            return text
+        digits = re.sub(r"\D", "", text)
+        if not digits:
+            return text
+        if digits.startswith("6"):
+            return f"sh{digits}"
+        if digits.startswith(("0", "3")):
+            return f"sz{digits}"
+        if digits.startswith(("4", "8")):
+            return f"bj{digits}"
+        return f"sh{digits}"
+
     @staticmethod
     def _find_col(columns: List[str], *keywords: str) -> Optional[str]:
         for col in columns:

@@ -33,7 +33,7 @@ _SYSTEM_PROMPT = (
 class PlannerAgent(BaseAgent):
     role_name = "planner"
 
-    def run(self, ctx: AgentContext, search_tool=None) -> None:
+    def run(self, ctx: AgentContext) -> None:
         topic = ctx.topic
         self.logger.info("正在为主题「%s」生成研究提纲", topic)
         messages = [
@@ -49,7 +49,11 @@ class PlannerAgent(BaseAgent):
                 temperature=0.2,
             )
             plan = self._coerce(topic, data)
-        except (LLMError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        except LLMError as exc:
+            # 认证/配置类错误必须上抛，不能静默退化成内置模板
+            self._raise_if_fatal(exc)
+            self.logger.warning("提纲生成异常，使用内置方法论模板：%s", exc)
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
             self.logger.warning("提纲生成异常，使用内置方法论模板：%s", exc)
 
         if plan is None or not plan.sections:

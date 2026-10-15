@@ -97,7 +97,7 @@ class OfflineResponder:
         topic = ctx.get("topic", "研究主题")
         headings = ctx.get("headings", [])
         lines = [
-            f"> ⚠️ 本报告由**离线演示模式**生成：未连接真实大模型与检索服务，",
+            "> ⚠️ 本报告由**离线演示模式**生成：未连接真实大模型与检索服务，",
             "> 以下内容为研报方法论模板与占位说明，不含真实数据，亦不构成任何投资建议。\n",
             f"本报告以“{topic}”为研究对象，按照 "
             f"{'、'.join(headings) if headings else '背景—分析—风险—结论'} "

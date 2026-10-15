@@ -50,6 +50,11 @@ class ResearchOrchestrator:
         mode_tag = "在线" if self.settings.effective_mode == "online" else "离线演示"
         logger.info("========== 开始生成研报（%s模式）主题：%s ==========", mode_tag, topic)
 
+        if deep and self.settings.is_offline:
+            hint = "离线演示模式下 --deep（递归深挖检索）不可用，已按单轮检索执行。"
+            logger.warning(hint)
+            ctx.log(f"[orchestrator] {hint}")
+
         self._step("① 规划提纲", self.planner, ctx, on_step)
         self._step("② 检索资料", self.researcher, ctx, on_step,
                    with_search=True, deep=deep)
@@ -74,11 +79,17 @@ class ResearchOrchestrator:
             if on_step:
                 on_step("修订", ctx)
 
+        # 审校结束后，用真实执行过的校验刷新「反幻觉总览」，
+        # 避免报告中出现未经执行的可信度声明。
+        self.writer.refresh_checks(ctx)
+
         elapsed = time.time() - started
         ctx.log(f"[orchestrator] 全流程耗时 {elapsed:.1f}s")
         logger.info("========== 研报生成完成，耗时 %.1fs ==========", elapsed)
         ctx.report.meta["elapsed_seconds"] = round(elapsed, 1)
         ctx.report.meta["trace"] = ctx.trace
+        ctx.report.meta["deep_requested"] = deep
+        ctx.report.meta["deep_effective"] = bool(deep and not self.settings.is_offline)
         return ctx.report
 
     def _step(self, name, agent, ctx, on_step, with_search: bool = False,
@@ -86,10 +97,12 @@ class ResearchOrchestrator:
         step_start = time.time()
         logger.info("---- %s 开始 ----", name)
         if with_search:
-            if deep:
-                agent.run(ctx, self.search_tool, deep=deep)
-            else:
-                agent.run(ctx, self.search_tool)
+            agent.run(
+                ctx,
+                self.search_tool,
+                deep=deep,
+                deep_rounds=self.settings.deep_search_rounds,
+            )
         else:
             agent.run(ctx)
         logger.info("---- %s 完成，用时 %.1fs ----", name, time.time() - step_start)

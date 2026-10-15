@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List
+from typing import List
 
 from ..common.schema import AgentContext, AnalysisNote, SearchResult, SectionPlan
 from .base import BaseAgent
@@ -20,7 +20,7 @@ class AnalystAgent(BaseAgent):
     TOP_K_EVIDENCE = 5
     MAX_WORKERS = 4  # 3.0：并行分析的章节数上限（IO密集型，线程池即可）
 
-    def run(self, ctx: AgentContext, search_tool=None) -> None:
+    def run(self, ctx: AgentContext) -> None:
         if ctx.plan is None:
             raise RuntimeError("分析阶段缺少研究提纲")
         results = ctx.search_results
@@ -46,6 +46,8 @@ class AnalystAgent(BaseAgent):
                 try:
                     note = fut.result()
                 except Exception as exc:  # noqa: BLE001
+                    # 认证/配置类错误不能被章节级兜底吞掉
+                    self._raise_if_fatal(exc)
                     self.logger.warning("章节「%s」分析失败，使用兜底：%s", section.heading, exc)
                     note = AnalysisNote(
                         heading=section.heading,
@@ -97,9 +99,14 @@ class AnalystAgent(BaseAgent):
             },
             label=section.heading,
         )
-        bullets = [str(b) for b in data.get("bullet_points", []) if b]
-        cites = [int(c) for c in data.get("citation_indexes", []) if str(c).isdigit()]
-        cites = [c for c in cites if c in evidence_idx]
+        bullets = self._to_str_list(data.get("bullet_points"))
+        raw_cites = data.get("citation_indexes")
+        if not isinstance(raw_cites, (list, tuple)):
+            raw_cites = []
+        cites = sorted({
+            val for val in (self._to_int(c, -1) for c in raw_cites)
+            if val in evidence_idx
+        })
 
         if not bullets:
             bullets = [f"{section.heading}：现有资料有限，建议补充权威来源后再下结论。"]
