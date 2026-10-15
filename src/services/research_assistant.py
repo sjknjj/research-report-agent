@@ -164,6 +164,66 @@ class ResearchAssistant:
         except Exception:
             pass
 
+        # 三大报表勾稽校验（v3.8新增）
+        statements_report = None
+        try:
+            import akshare as ak
+            from src.verify.statements import check_statements
+
+            # 抓三大报表
+            balance_df = ak.stock_financial_report_sina(stock=symbol, symbol="资产负债表")
+            income_df = ak.stock_financial_report_sina(stock=symbol, symbol="利润表")
+            cashflow_df = ak.stock_financial_report_sina(stock=symbol, symbol="现金流量表")
+
+            # 取最新一期数据，转换成字典
+            def _df_to_dict(df, col_map):
+                if df is None or df.empty:
+                    return {}
+                latest = df.iloc[0]  # 第一行是最新期
+                result = {}
+                for cn_name, en_name in col_map.items():
+                    if cn_name in latest.index:
+                        val = latest[cn_name]
+                        try:
+                            result[en_name] = float(val)
+                        except (ValueError, TypeError):
+                            pass
+                return result
+
+            balance = _df_to_dict(balance_df, {
+                "资产总计": "total_assets",
+                "负债合计": "total_liabilities",
+                "所有者权益(或股东权益)合计": "total_equity",
+            })
+            income = _df_to_dict(income_df, {
+                "营业收入": "revenue",
+                "营业总成本": "operating_cost",
+                "营业利润": "operating_profit",
+                "利润总额": "total_profit",
+                "所得税费用": "income_tax",
+                "净利润": "net_profit",
+            })
+            cashflow = _df_to_dict(cashflow_df, {
+                "期初现金及现金等价物余额": "begin_cash",
+                "期末现金及现金等价物余额": "end_cash",
+                "经营活动产生的现金流量净额": "net_op_cash",
+                "投资活动产生的现金流量净额": "net_inv_cash",
+                "筹资活动产生的现金流量净额": "net_fin_cash",
+            })
+
+            statements_report = check_statements(balance=balance, income=income, cashflow=cashflow)
+
+            # 把勾稽结果加到报告末尾
+            if statements_report.items:
+                st_text = "\n\n---\n\n📋 **三大报表勾稽校验**\n\n"
+                st_text += f"勾稽结论：{'✅ 通过' if statements_report.passed else '⚠️ 未通过'}\n\n"
+                for item in statements_report.items:
+                    icon = "✅" if item.passed else "❌"
+                    st_text += f"- {icon} **{item.name}**：{item.detail}\n"
+                final_text = final_text + st_text
+        except Exception as exc:
+            logger.warning("三大报表勾稽校验失败（不影响主流程）：%s", exc)
+
         return AssistantResult(
             text=final_text,
             verification=verification.to_dict(),
@@ -175,6 +235,7 @@ class ResearchAssistant:
                 "chain": chain_info.get("chain") if chain_info else None,
                 "chain_graph": chain_graph_html(chain_info, bundle.symbol) if chain_info else "",
                 "technicals": bundle.technicals,
+                "statements": statements_report.to_dict() if statements_report else None,
             },
         )
 

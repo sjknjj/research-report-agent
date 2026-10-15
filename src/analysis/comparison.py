@@ -130,3 +130,104 @@ class ComparisonService:
         lines.append("")
         lines.append("> 估值指标 PE/PB 越低越便宜；增速/ROE/区间涨跌越高越优；数据口径见各公司事实包。")
         return "\n".join(lines)
+
+
+def radar_chart_html(rows: List[CompanyRow]) -> str:
+    """多公司对比雷达图（Plotly 交互式）。
+
+    维度：估值（PE/PB反向）、成长（营收/净利增速）、盈利（毛利率/ROE）、技术面。
+    """
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        return ""
+
+    # 维度定义
+    dimensions = ["估值水平", "营收增长", "利润增长", "盈利能力", "技术面强弱"]
+
+    def _score(row: CompanyRow) -> List[float]:
+        """把各指标归一化成 0-100 分。"""
+        scores = []
+        # 估值：PE/PB 越低分越高（反向）
+        pe = row.pe or 20
+        pe_score = max(0, min(100, 100 - (pe - 10) * 5))
+        scores.append(pe_score)
+        # 营收增长
+        rev = row.revenue_yoy or 0
+        rev_score = max(0, min(100, 50 + rev * 2))
+        scores.append(rev_score)
+        # 利润增长
+        profit = row.profit_yoy or 0
+        profit_score = max(0, min(100, 50 + profit * 2))
+        scores.append(profit_score)
+        # 盈利能力（毛利率+ROE平均）
+        gm = row.gross_margin or 30
+        roe = row.roe or 10
+        profit_ability = (gm + roe * 2) / 3
+        scores.append(max(0, min(100, profit_ability * 1.5)))
+        # 技术面（涨跌幅 + 信号数）
+        ret = row.period_return or 0
+        signal = row.signal_count or 0
+        tech_score = max(0, min(100, 50 + ret * 5 + signal * 10))
+        scores.append(tech_score)
+        return scores
+
+    fig = go.Figure()
+    for row in rows[:5]:  # 最多画5家，不然太挤
+        scores = _score(row)
+        fig.add_trace(go.Scatterpolar(
+            r=scores,
+            theta=dimensions,
+            fill="toself",
+            name=f"{row.name}({row.symbol})",
+        ))
+
+    fig.update_layout(
+        polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+        showlegend=True,
+        title="多公司对比雷达图（0-100分，越高越好）",
+    )
+
+    return fig.to_html(full_html=False, include_plotlyjs="cdn")
+
+
+def valuation_percentile_html(rows: List[CompanyRow]) -> str:
+    """估值分位图（PE/PB 在同行中的位置）。"""
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        return ""
+
+    valid_pe = [r.pe for r in rows if r.pe and r.pe > 0]
+    valid_pb = [r.pb for r in rows if r.pb and r.pb > 0]
+
+    if not valid_pe:
+        return ""
+
+    fig = go.Figure()
+
+    # PE 柱状图
+    fig.add_trace(go.Bar(
+        x=[f"{r.name}({r.symbol})" for r in rows if r.pe and r.pe > 0],
+        y=[r.pe for r in rows if r.pe and r.pe > 0],
+        name="市盈率(PE)",
+        marker_color="#74b9ff",
+    ))
+
+    # PB 柱状图
+    if valid_pb:
+        fig.add_trace(go.Bar(
+            x=[f"{r.name}({r.symbol})" for r in rows if r.pb and r.pb > 0],
+            y=[r.pb for r in rows if r.pb and r.pb > 0],
+            name="市净率(PB)",
+            marker_color="#fab1a0",
+        ))
+
+    fig.update_layout(
+        title="估值对比（越低越便宜）",
+        xaxis_title="公司",
+        yaxis_title="数值",
+        barmode="group",
+    )
+
+    return fig.to_html(full_html=False, include_plotlyjs="cdn")
