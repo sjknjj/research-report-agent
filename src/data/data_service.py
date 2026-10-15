@@ -72,8 +72,13 @@ class CompanyBundle:
 class DataService:
     """对外统一的数据入口，实时抓取失败时安全回退到离线样例。"""
 
-    def __init__(self, source: Optional[AKShareSource] = None):
+    def __init__(
+        self,
+        source: Optional[AKShareSource] = None,
+        manager: Optional[DataSourceManager] = None,
+    ):
         self.source = source or AKShareSource()
+        self.manager = manager  # 多数据源管理器（可选）
 
     # ------------------------------------------------------------------
     def get_company_bundle(
@@ -127,8 +132,19 @@ class DataService:
     # ------------------------------------------------------------------
     def _live_bundle(self, code: str, start_date: str, end_date: str) -> CompanyBundle:
         logger.info("实时抓取 %s 行情/财务（%s~%s）", code, start_date, end_date)
-        price_raw = self.source.price_daily(code, start_date, end_date)
-        fin_raw = self.source.financial_abstract(code)
+
+        # 如果有多数据源管理器，用它取数（带容灾）
+        if self.manager:
+            price_raw, price_source = self.manager.fetch_with_failover(
+                "price_daily", symbol=code, start_date=start_date, end_date=end_date
+            )
+            fin_raw, fin_source = self.manager.fetch_with_failover(
+                "financial_abstract", symbol=code
+            )
+            logger.info("行情数据源：%s，财务数据源：%s", price_source, fin_source)
+        else:
+            price_raw = self.source.price_daily(code, start_date, end_date)
+            fin_raw = self.source.financial_abstract(code)
 
         price_clean = clean_price(price_raw)
         fin_clean = clean_financial(fin_raw)
