@@ -345,8 +345,14 @@ def build_assistant_markdown(
         total_numbers = verification.get("total_numbers", verification.get("total_claims", 0))
         coverage = verification.get("coverage")
         coverage_text = f"{coverage:.0%}" if isinstance(coverage, (int, float)) else "—"
+        # T1：三态结论——不允许在覆盖率不足/无来源过多时显示"通过"
+        verdict_text = verification.get("verdict_text") or (
+            "通过" if verification.get("passed") else "未通过"
+        )
+        verdict = verification.get("verdict") or ("pass" if verification.get("passed") else "fail")
+        verdict_mark = {"pass": "✅", "review": "⚠️", "fail": "❌"}.get(verdict, "⚠️")
         lines.append(
-            f"**结论：{'通过' if verification.get('passed') else '未通过'}**　"
+            f"**结论：{verdict_mark} {verdict_text}**　"
             f"可信度：{verification.get('confidence_level', '—')}　"
             f"共核对 {total_numbers} 个数字——"
             f"一致 {verification.get('supported', 0)}、"
@@ -357,6 +363,12 @@ def build_assistant_markdown(
             f"疑似幻觉率 {verification.get('hallucination_rate', 0):.1%}"
         )
         lines.append("")
+        verdict_reasons = verification.get("verdict_reasons") or []
+        if verdict_reasons:
+            lines.append(f"**{verdict_text}的原因：**")
+            lines.append("")
+            lines += [f"- {_md_cell(r)}" for r in verdict_reasons]
+            lines.append("")
         if verification.get("claims"):
             lines += ["| 指标 | 状态 | 核对说明 |", "| --- | --- | --- |"]
             for claim in verification["claims"]:

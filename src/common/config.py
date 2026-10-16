@@ -110,6 +110,9 @@ class Settings:
     export_formats: List[str] = field(default_factory=lambda: ["md", "html"])
     log_level: str = "INFO"
 
+    # ---- RAG（T1：相关性下限，避免把不相关片段塞进 prompt）----
+    rag_min_score: float = 0.15
+
     # ---- 多数据源（DataSourceManager）----
     # 留空 = 只用默认的 AKShare 单源；配置多个则启用容灾切换与交叉验证
     data_sources: List[str] = field(default_factory=list)
@@ -192,6 +195,7 @@ def load_settings(
     settings.max_review_rounds = _env_int("REVIEW_MAX_ROUNDS", settings.max_review_rounds)
     settings.deep_search_rounds = _env_int("DEEP_SEARCH_ROUNDS", settings.deep_search_rounds)
     settings.debate_rounds = _env_int("DEBATE_ROUNDS", settings.debate_rounds)
+    settings.rag_min_score = _env_float("RAG_MIN_SCORE", settings.rag_min_score)
     settings.output_dir = _env_str("OUTPUT_DIR", settings.output_dir)
     if os.environ.get("EXPORT_FORMATS"):
         settings.export_formats = _env_list("EXPORT_FORMATS", settings.export_formats)

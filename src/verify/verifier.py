@@ -34,16 +34,39 @@ from .numbers import (
     KIND_PRICE,
     extract_numbers,
     format_number,
+    match_cn_at,
 )
 
 logger = get_logger("verify.cross")
 
 _YI, _WAN = 1e8, 1e4
-# 容差（与 README:190「容差 1%」一致）
-REL_TOL = 0.01          # 金额 / 价格相对容差 1%
-PCT_TOL = 0.1           # 百分点绝对容差 0.1
+# 容差（T1：按指标重要性分级，核心指标收紧到 0.5%）
+REL_TOL = 0.01          # 一般指标的金额/价格相对容差 1%
+REL_TOL_CORE = 0.005    # 核心指标（营收/净利/EPS/ROE/毛利率…）收紧到 0.5%
+PCT_TOL = 0.1           # 一般指标的百分点绝对容差 0.1
+PCT_TOL_CORE = 0.06     # 核心指标的百分点绝对容差（保留 1 位小数的舍入空间）
 PRICE_TOL = 0.01
 _FLOAT_EPS = 1e-9       # 浮点边界保护（如 0.1 实际为 0.10000000000000142）
+
+# 核心指标：金额/比率直接决定结论，容差收紧
+CORE_METRICS = frozenset({
+    "revenue", "net_profit", "net_profit_deducted", "eps", "roe",
+    "gross_margin", "net_margin", "revenue_yoy", "net_profit_yoy",
+    "net_profit_deducted_yoy", "revenue_qoq", "net_profit_qoq",
+})
+
+# T1：结论阈值——覆盖率过低/无来源过多时不允许显示"通过"
+COVERAGE_MIN = 0.60        # 可核实覆盖率下限
+UNSOURCED_MAX = 0.30       # 无来源数字占比上限
+UNVERIFIABLE_MAX = 0.50    # 无法核实占比上限
+
+
+def tol_for(metric: str, kind: str) -> float:
+    """按指标重要性返回容差。"""
+    core = metric in CORE_METRICS
+    if kind == "percent":
+        return PCT_TOL_CORE if core else PCT_TOL
+    return REL_TOL_CORE if core else REL_TOL
 
 # 数值：支持千分位与正负号
 _NUMPAT = r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
@@ -56,6 +79,8 @@ _PCT_RE = re.compile(_CONN + r"(" + _NUMPAT + r")\s*(?:个百分点|%|％)")
 # 价格类：必须紧邻指标名；单位可有可无（PE/PB 无单位），但必须排除百分号与年份
 _PRICE_RE = re.compile(_CONN + r"(" + _NUMPAT + r")\s*(元|港元|美元|倍)?")
 _YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+# 连接词前缀（用于中文数字兜底时跳过 "为/达到/约" 等）
+_CONN_RE = re.compile(_CONN)
 
 # 锚点与增速词之间的最大跨度
 _YOY_WINDOW = 40
@@ -227,7 +252,71 @@ class VerificationReport:
         return round(self.n_mismatch / len(self.claims), 3)
 
     @property
+    def has_mismatch(self) -> bool:
+        """是否存在与事实库矛盾的数字（重写循环应以此为准，而不是严格版 passed）。"""
+        return self.n_mismatch > 0
+
+    # ---- T1：三态结论 ---------------------------------------------------
+    # 旧版 passed 只看"有没有矛盾"，于是"数字全是无来源"的报告也会显示"通过"，
+    # 这是最危险的假阳性安全感。现在结论分三态：通过 / 通过（需人工复核）/ 未通过。
+    @property
+    def verdict(self) -> str:
+        """``pass`` / ``review`` / ``fail``。"""
+        if self.has_mismatch:
+            return "fail"
+        if self.total_numbers == 0:
+            # 一个财务数字都没抽到：不能算"通过"，只能说没东西可核
+            return "review"
+        if self.coverage < COVERAGE_MIN:
+            return "review"
+        if self.unsourced_ratio > UNSOURCED_MAX:
+            return "review"
+        if self.unverifiable_ratio > UNVERIFIABLE_MAX:
+            return "review"
+        if self.contradictions:
+            return "review"
+        return "pass"
+
+    @property
+    def verdict_text(self) -> str:
+        return {"pass": "通过", "review": "通过但有保留（需人工复核）",
+                "fail": "未通过"}[self.verdict]
+
+    @property
+    def verdict_reasons(self) -> List[str]:
+        """为什么不是"通过"（含 fail 与 review 的原因）。"""
+        reasons: List[str] = []
+        if self.has_mismatch:
+            reasons.append(f"存在 {self.n_mismatch} 处与事实库矛盾的数字")
+        if self.total_numbers == 0:
+            reasons.append("未能从正文中抽取到任何财务数字，无法核实")
+            return reasons
+        if self.coverage < COVERAGE_MIN:
+            reasons.append(
+                f"可核实覆盖率仅 {self.coverage:.0%}（低于 {COVERAGE_MIN:.0%}）"
+            )
+        if self.unsourced_ratio > UNSOURCED_MAX:
+            reasons.append(
+                f"无来源数字占比 {self.unsourced_ratio:.0%}（高于 {UNSOURCED_MAX:.0%}），"
+                f"共 {len(self.unsourced)} 个数字无法归因"
+            )
+        if self.unverifiable_ratio > UNVERIFIABLE_MAX:
+            reasons.append(
+                f"事实库无法核实的数字占比 {self.unverifiable_ratio:.0%}"
+                f"（高于 {UNVERIFIABLE_MAX:.0%}）"
+            )
+        if self.contradictions:
+            reasons.append(f"报告内部存在 {len(self.contradictions)} 处自相矛盾")
+        return reasons
+
+    @property
     def passed(self) -> bool:
+        """严格通过：无矛盾 **且** 覆盖率达标、无来源/无法核实比例不过高。"""
+        return self.verdict == "pass"
+
+    @property
+    def passed_lenient(self) -> bool:
+        """宽松通过（仅表示"没有与事实库矛盾"），兼容旧语义。"""
         return self.n_mismatch == 0
 
     # ---- 可信度（U4：按覆盖率/无来源占比校准）---------------------------
@@ -294,6 +383,10 @@ class VerificationReport:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "passed": self.passed,
+            "passed_lenient": self.passed_lenient,
+            "verdict": self.verdict,
+            "verdict_text": self.verdict_text,
+            "verdict_reasons": self.verdict_reasons,
             "confidence_level": self.confidence_level,
             "confidence_reasons": self.confidence_reasons,
             "total_claims": len(self.claims),
@@ -316,7 +409,7 @@ class VerificationReport:
 
     def render_text(self) -> str:
         lines = [
-            f"交叉校验结论：{'通过' if self.passed else '未通过'}｜"
+            f"交叉校验结论：{self.verdict_text}｜"
             f"可信度：{self.confidence_level}｜"
             f"共核对 {self.total_numbers} 个数字：一致 {self.n_supported}、"
             f"矛盾 {self.n_mismatch}、无法核实 {self.n_unverifiable}、"
@@ -324,6 +417,9 @@ class VerificationReport:
             f"可核实覆盖率 {self.coverage:.0%}｜"
             f"疑似幻觉率 {self.hallucination_rate:.1%}",
         ]
+        if self.verdict_reasons:
+            lines.append("结论保留意见：")
+            lines.extend(f"  - {r}" for r in self.verdict_reasons)
         for c in self.claims:
             mark = {"supported": "✓", "mismatch": "✗", "unverifiable": "?"}[c["status"]]
             lines.append(f"  [{mark}] {c['label']}：{c['note']}")
@@ -468,7 +564,7 @@ class CrossVerifier:
             conflicts = []
             for i in range(len(values)):
                 for j in range(i + 1, len(values)):
-                    if not self._values_close(values[i], values[j], kind):
+                    if not self._values_close(values[i], values[j], kind, metric):
                         conflicts.append((values[i], values[j]))
             if len(conflicts) >= 1:
                 out.append({
@@ -482,11 +578,13 @@ class CrossVerifier:
         out.sort(key=lambda x: x["metric"])
         return out
 
-    def _values_close(self, a: float, b: float, kind: Optional[str]) -> bool:
+    def _values_close(self, a: float, b: float, kind: Optional[str],
+                      metric: str = "") -> bool:
+        tol = tol_for(metric, kind or "")
         if kind == "percent":
-            return abs(a - b) <= self.pct_tol + _FLOAT_EPS
+            return abs(a - b) <= tol + _FLOAT_EPS
         denom = abs(b) or 1e-9
-        return abs(a - b) / denom <= self.rel_tol + _FLOAT_EPS
+        return abs(a - b) / denom <= tol + _FLOAT_EPS
 
     # ------------------------------------------------------------------
     def _judge(self, claim: Claim, fact) -> Dict[str, Any]:
@@ -498,12 +596,13 @@ class CrossVerifier:
                     "correction": ""}
         if claim.kind == "percent":
             diff = abs(claim.claimed - fact.value)
+            tol = tol_for(claim.metric, claim.kind)
             # 加浮点保护：0.1 在二进制下可能略大于 0.1
-            ok = diff <= self.pct_tol + _FLOAT_EPS
+            ok = diff <= tol + _FLOAT_EPS
         else:
             denom = abs(fact.value) or 1e-9
             diff = abs(claim.claimed - fact.value)
-            ok = diff / denom <= self.rel_tol + _FLOAT_EPS
+            ok = diff / denom <= tol_for(claim.metric, claim.kind) + _FLOAT_EPS
 
         fact_text = self._display(claim.kind, fact.value)
         claim_text = self._display(claim.kind, claim.claimed)
@@ -655,7 +754,19 @@ class CrossVerifier:
     @classmethod
     def _read_value(cls, window: str, kind: str,
                     unit_required: bool = False) -> Tuple[Optional[float], str, int]:
-        """从窗口开头读取数值，返回 (值, 原文, 数值在窗口内的偏移)。"""
+        """从窗口开头读取数值，返回 (值, 原文, 数值在窗口内的偏移)。
+
+        阿拉伯数字优先，中文数字（T1）兜底——否则
+        「营业总收入一百五十二点三亿元」只能被当作"无来源数字"，无法归因到指标。
+        """
+        value, raw, offset = cls._read_value_digits(window, kind, unit_required)
+        if value is not None:
+            return value, raw, offset
+        return cls._read_value_cn(window, kind, unit_required)
+
+    @classmethod
+    def _read_value_digits(cls, window: str, kind: str,
+                           unit_required: bool = False) -> Tuple[Optional[float], str, int]:
         if kind == "amount":
             m = _AMOUNT_RE.match(window)
             if not m:
@@ -691,3 +802,29 @@ class CrossVerifier:
         if unit_required and not unit:
             return None, "", 0
         return num, m.group(0), m.start(1)
+
+    @classmethod
+    def _read_value_cn(cls, window: str, kind: str,
+                       unit_required: bool = False) -> Tuple[Optional[float], str, int]:
+        """中文数字兜底（T1）。"""
+        conn = _CONN_RE.match(window)
+        start = conn.end() if conn else 0
+        hit = match_cn_at(window[start:])
+        if hit is None:
+            return None, "", 0
+        value, raw, has_big, has_pct, has_price_unit = hit
+        if kind == "amount":
+            # 金额必须有 万/亿 这类大单位（"五十万股"这种计数不算金额）
+            if not has_big:
+                return None, "", 0
+            return value, raw, start
+        if kind == "percent":
+            if not has_pct:
+                return None, "", 0
+            return value, raw, start
+        # price
+        if has_pct or has_big:
+            return None, "", 0
+        if unit_required and not has_price_unit:
+            return None, "", 0
+        return value, raw, start

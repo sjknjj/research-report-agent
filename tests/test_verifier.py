@@ -136,23 +136,38 @@ class CrossVerifierTest(unittest.TestCase):
         self.assertAlmostEqual(revenue["claimed"], 1523.0 * 1e8)
         self.assertEqual(revenue["status"], "mismatch")
 
-    # ---- 修复 #14：容差与浮点边界 -----------------------------------
-    def test_relative_tolerance_one_percent(self):
-        ok = self.verifier.verify("营业总收入153.50亿元。", self.fact_base)
+    # ---- 修复 #14：容差与浮点边界（T1：核心指标收紧到 0.5%）-----------
+    def test_core_metric_tolerance_is_tightened(self):
+        # 营收是核心指标：0.5% 容差
+        ok = self.verifier.verify("营业总收入152.90亿元。", self.fact_base)   # 偏差 0.39%
         self.assertEqual(next(c for c in ok.claims if c["metric"] == "revenue")["status"],
                          "supported")
-        bad = self.verifier.verify("营业总收入154.00亿元。", self.fact_base)
+        # 153.50 -> 偏差 0.79%，超过核心指标 0.5% -> 必须判为矛盾
+        bad = self.verifier.verify("营业总收入153.50亿元。", self.fact_base)
         self.assertEqual(next(c for c in bad.claims if c["metric"] == "revenue")["status"],
+                         "mismatch")
+        worse = self.verifier.verify("营业总收入154.00亿元。", self.fact_base)
+        self.assertEqual(next(c for c in worse.claims if c["metric"] == "revenue")["status"],
                          "mismatch")
 
     def test_pct_tolerance_and_float_boundary(self):
-        # 12.6 - 12.5 在二进制下是 0.09999999999999964，必须仍判一致
-        ok = self.verifier.verify("营业总收入同比增长12.6%。", self.fact_base)
+        # 核心指标百分比容差 0.06：保留 1 位小数的舍入空间
+        ok = self.verifier.verify("营业总收入同比增长12.55%。", self.fact_base)
         self.assertEqual(next(c for c in ok.claims if c["metric"] == "revenue_yoy")["status"],
                          "supported")
-        bad = self.verifier.verify("营业总收入同比增长12.8%。", self.fact_base)
+        # 12.6 - 12.5 = 0.1，超过核心容差 -> 矛盾
+        bad = self.verifier.verify("营业总收入同比增长12.6%。", self.fact_base)
         self.assertEqual(next(c for c in bad.claims if c["metric"] == "revenue_yoy")["status"],
                          "mismatch")
+        worse = self.verifier.verify("营业总收入同比增长12.8%。", self.fact_base)
+        self.assertEqual(next(c for c in worse.claims if c["metric"] == "revenue_yoy")["status"],
+                         "mismatch")
+
+    def test_non_core_metric_keeps_looser_tolerance(self):
+        from src.verify.verifier import tol_for
+        self.assertLess(tol_for("revenue", "amount"), tol_for("pe_ratio", "price"))
+        # 非核心指标仍用 1%
+        self.assertAlmostEqual(tol_for("pe_ratio", "price"), 0.01)
 
     # ---- 修复 #7：price 类抽取约束 ----------------------------------
     def test_price_not_captured_from_percent(self):

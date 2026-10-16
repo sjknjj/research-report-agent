@@ -41,6 +41,127 @@ _TOKEN_RE = re.compile(
 _YEAR_SUFFIX_RE = re.compile(r"\s*年")
 _CODE_RE = re.compile(r"\d{6}")
 
+# ---- 中文数字（T1：此前"一百五十二点三亿元"完全漏检）------------------
+_CN_DIGITS = {
+    "零": 0, "〇": 0, "一": 1, "壹": 1, "二": 2, "贰": 2, "两": 2, "三": 3, "叁": 3,
+    "四": 4, "肆": 4, "五": 5, "伍": 5, "六": 6, "陆": 6, "七": 7, "柒": 7,
+    "八": 8, "捌": 8, "九": 9, "玖": 9,
+}
+_CN_UNITS = {"十": 10, "拾": 10, "百": 100, "佰": 100, "千": 1000, "仟": 1000}
+_CN_BIG = {"万": 1e4, "亿": 1e8}
+_CN_CHARS = "零〇一壹二贰两三叁四肆五伍六陆七柒八捌九玖十拾百佰千仟万亿"
+_CN_FRAC_CHARS = "零〇一二三四五六七八九"
+_CN_NUM_RE = re.compile(
+    r"(?P<cn>[" + _CN_CHARS + r"]{1,24}(?:点[" + _CN_FRAC_CHARS + r"]{1,6})?)"
+    r"(?P<big_unit>万亿|亿|万)?"
+    r"(?:\s*(?:(?P<pct>个百分点|%|％)|(?P<price_unit>元|港元|美元|人民币)))?"
+)
+# 中文量词：出现量词说明是"计数"而不是金额（如"一万二千人"）
+_CN_COUNTER_RE = re.compile(r"\s*(人|家|个|名|项|台|辆|只|件|次|天|月|年|份|张|条|户)")
+# "百分之四十二点三" 这种前缀写法
+_CN_PCT_PREFIX_RE = re.compile(
+    r"百分之\s*(?P<cn>[" + _CN_CHARS + r"]{1,24}(?:点[" + _CN_FRAC_CHARS + r"]{1,6})?)"
+)
+
+
+def cn_int(s: str) -> float:
+    """解析不含小数点的中文整数（支持 千百十 / 万 / 亿）。"""
+    total = 0.0
+    section = 0.0
+    number = 0.0
+    for ch in s:
+        if ch in _CN_DIGITS:
+            number = float(_CN_DIGITS[ch])
+        elif ch in _CN_UNITS:
+            unit = float(_CN_UNITS[ch])
+            if number == 0 and unit == 10:
+                number = 1.0          # "十五" = 15
+            section += number * unit
+            number = 0.0
+        elif ch in _CN_BIG:
+            section = (section + number) * _CN_BIG[ch]
+            total += section
+            section = 0.0
+            number = 0.0
+    return total + section + number
+
+
+def cn_to_number(s: str) -> Optional[float]:
+    """中文数字转阿拉伯数字。
+
+    支持 ``一百五十二点三亿`` / ``三万亿`` / ``一万二千`` / ``三点五`` 等写法。
+    末尾的 亿/万亿/万 作为倍数处理，返回值是**绝对值**（金额即"元"）。
+    """
+    if not s:
+        return None
+    text = s.strip()
+    if not text or not any(ch in _CN_DIGITS or ch in _CN_UNITS or ch in _CN_BIG
+                           for ch in text):
+        return None
+    mult = 1.0
+    # 先剥离末尾的大单位作为倍数（"一百五十二点三亿" -> "一百五十二点三" × 1e8）
+    while text:
+        if text.endswith("万亿"):
+            mult *= 1e12
+            text = text[:-2]
+        elif text.endswith("亿"):
+            mult *= 1e8
+            text = text[:-1]
+        elif text.endswith("万"):
+            mult *= 1e4
+            text = text[:-1]
+        else:
+            break
+    if not text:
+        return None
+    if "点" in text:
+        int_part, frac_part = text.split("点", 1)
+        base = cn_int(int_part) if int_part else 0.0
+        frac = 0.0
+        scale = 0.1
+        for ch in frac_part:
+            digit = _CN_DIGITS.get(ch)
+            if digit is None:
+                break
+            frac += digit * scale
+            scale /= 10
+        return (base + frac) * mult
+    return cn_int(text) * mult
+
+
+def match_cn_at(text: str):
+    """在 ``text`` 的**开头**匹配一个中文数字。
+
+    返回 ``(value, raw, has_big_unit, has_pct, has_price_unit)``，无法匹配返回 None。
+    供 ``verifier._read_value`` 做"指标 + 中文数字"的归因（否则
+    「营业总收入一百五十二点三亿元」只能被当作"无来源数字"）。
+    """
+    if not text:
+        return None
+    # "百分之四十二点三" 前缀写法
+    pm = _CN_PCT_PREFIX_RE.match(text)
+    if pm:
+        pv = cn_to_number(pm.group("cn"))
+        if pv is not None:
+            return pv, pm.group(0).strip(), False, True, False
+    m = _CN_NUM_RE.match(text)
+    if not m or not m.group("cn"):
+        return None
+    cn_text = m.group("cn")
+    value = cn_to_number(cn_text)
+    if value is None:
+        return None
+    big_unit = m.group("big_unit")
+    if big_unit:
+        value *= {"万亿": _WANYI, "亿": _YI, "万": _WAN}[big_unit]
+    return (
+        value,
+        m.group(0).strip(),
+        bool(big_unit) or any(ch in cn_text for ch in ("万", "亿")),
+        m.group("pct") is not None,
+        m.group("price_unit") is not None,
+    )
+
 # 数值种类
 KIND_AMOUNT = "amount"      # 金额（归一到元）
 KIND_PERCENT = "percent"    # 百分比数值
@@ -141,6 +262,65 @@ def extract_numbers(text: str, context_window: int = 32) -> List[NumberMention]:
             end=end,
             context=text[ctx_start:ctx_end],
         ))
+
+    # ---- 第二遍：中文数字（T1）----
+    # 阿拉伯数字已覆盖的区间直接跳过，避免同一处被抽两次
+    covered = [(m.start, m.end) for m in out]
+    # "百分之四十二点三" —— 先处理，并把区间标记为已覆盖
+    for m in _CN_PCT_PREFIX_RE.finditer(text):
+        start, end = m.start(), m.end()
+        if any(start < c_end and end > c_start for c_start, c_end in covered):
+            continue
+        value = cn_to_number(m.group("cn"))
+        if value is None:
+            continue
+        covered.append((start, end))
+        out.append(NumberMention(
+            raw=m.group(0).strip(),
+            literal=m.group("cn"),
+            value=value,
+            kind=KIND_PERCENT,
+            start=start,
+            end=end,
+            context=text[max(0, start - context_window): end + context_window],
+        ))
+    for m in _CN_NUM_RE.finditer(text):
+        start, end = m.start("cn"), m.end("cn")
+        if any(start < c_end and end > c_start for c_start, c_end in covered):
+            continue
+        cn_text = m.group("cn")
+        value = cn_to_number(cn_text)
+        if value is None:
+            continue
+        pct = m.group("pct")
+        price_unit = m.group("price_unit")
+        big_unit = m.group("big_unit")
+        if big_unit:
+            # "一百五十二点三亿" 这类：小数点在先，大单位单独出现
+            value *= {"万亿": _WANYI, "亿": _YI, "万": _WAN}[big_unit]
+        has_big = bool(big_unit) or any(ch in cn_text for ch in ("万", "亿"))
+        counter_after = _CN_COUNTER_RE.match(text[m.end("cn"): m.end("cn") + 3])
+
+        if pct:
+            kind = KIND_PERCENT
+        elif price_unit:
+            kind = KIND_AMOUNT if has_big else KIND_PRICE
+        elif has_big and not counter_after:
+            kind = KIND_AMOUNT
+        else:
+            kind = KIND_BARE            # 计数/量词 -> 不计入覆盖率分母
+        ctx_start = max(0, start - context_window)
+        ctx_end = min(len(text), end + context_window)
+        out.append(NumberMention(
+            raw=m.group(0).strip(),
+            literal=cn_text,
+            value=value,
+            kind=kind,
+            start=start,
+            end=end,
+            context=text[ctx_start:ctx_end],
+        ))
+    out.sort(key=lambda item: item.start)
     return out
 
 

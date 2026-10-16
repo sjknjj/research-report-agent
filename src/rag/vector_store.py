@@ -16,6 +16,10 @@ logger = logging.getLogger("rag.vector_store")
 # 索引结构版本：带向量持久化的新格式
 INDEX_VERSION = 2
 
+# T1：检索相关性下限（归一化向量下的点积/余弦，范围 [-1,1]）。
+# 低于该值的片段视为"不相关"，不再注入 prompt。
+DEFAULT_MIN_SCORE = 0.15
+
 
 @dataclass
 class Doc:
@@ -59,9 +63,17 @@ class VectorStore:
             self.vectors.append(vector)
 
     # -- 检索 ---------------------------------------------------------------
-    def search(self, query: str, top_k: int = 3) -> List[dict]:
+    def search(self, query: str, top_k: int = 3,
+               min_score: Optional[float] = None) -> List[dict]:
+        """按余弦/点积相似度检索。
+
+        T1：新增 ``min_score`` 相关性下限。旧实现无条件返回 top_k——
+        即使所有片段都毫不相关，也会被塞进 prompt 充当"历史相似案例"，
+        反而可能给模型引入错误信息。低于阈值的片段直接丢弃。
+        """
         if not self.vectors or not self.docs:
             return []
+        threshold = DEFAULT_MIN_SCORE if min_score is None else float(min_score)
         query_vector = self.embedder.embed_one(query)
         query_dim = query_vector.size
         scored = []
@@ -77,6 +89,13 @@ class VectorStore:
             )
             return []
         scored.sort(key=lambda item: item[0], reverse=True)
+        hit = [(s, i) for s, i in scored[:top_k] if s >= threshold]
+        if not hit and scored:
+            logger.info(
+                "RAG 检索到 %d 条候选但相关性均低于阈值 %.2f（最高 %.3f），本次不注入任何片段",
+                len(scored), threshold, scored[0][0],
+            )
+            return []
         return [
             {
                 "text": self.docs[idx].text[:500],
@@ -84,7 +103,7 @@ class VectorStore:
                 "score": round(score, 3),
                 "metadata": self.docs[idx].metadata,
             }
-            for score, idx in scored[:top_k]
+            for score, idx in hit
         ]
 
     # -- 持久化 -------------------------------------------------------------
