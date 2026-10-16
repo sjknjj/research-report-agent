@@ -8,9 +8,15 @@ on:
     - cron: '0 1 * * 1-5'
   workflow_dispatch:  # 支持手动触发
 
+permissions:
+  contents: read
+
 jobs:
   daily-report:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TZ: Asia/Shanghai
     steps:
       - uses: actions/checkout@v4
 
@@ -18,30 +24,53 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: pip
 
       - name: 安装依赖
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install akshare pandas numpy requests
 
       - name: 配置环境变量
+        env:
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
+          WECOM_WEBHOOK_KEY: ${{ secrets.WECOM_WEBHOOK_KEY }}
         run: |
-          cat > .env << EOF
-          LLM_BASE_URL=${{ secrets.LLM_BASE_URL }}
-          LLM_API_KEY=${{ secrets.LLM_API_KEY }}
-          LLM_MODEL=${{ secrets.LLM_MODEL }}
-          FEISHU_WEBHOOK_URL=${{ secrets.FEISHU_WEBHOOK_URL }}
-          FEISHU_SECRET=${{ secrets.FEISHU_SECRET }}
-          WECOM_WEBHOOK_KEY=${{ secrets.WECOM_WEBHOOK_KEY }}
-          OUTPUT_DIR=output
-          EOF
+          set -euo pipefail
+          # 必需项缺失时直接失败，避免把空字符串写进 .env 导致模型名为空
+          missing=""
+          for name in LLM_BASE_URL LLM_API_KEY LLM_MODEL; do
+            if [ -z "${!name:-}" ]; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::缺少必需 secret:$missing（请在仓库 Settings → Secrets and variables → Actions 中配置）"
+            exit 1
+          fi
+          # 只写入非空项，避免空 secret 覆盖默认配置
+          : > .env
+          for name in LLM_BASE_URL LLM_API_KEY LLM_MODEL \
+                      FEISHU_WEBHOOK_URL FEISHU_SECRET WECOM_WEBHOOK_KEY; do
+            value="${!name:-}"
+            if [ -n "$value" ]; then
+              printf '%s=%s\n' "$name" "$value" >> .env
+            fi
+          done
+          echo "OUTPUT_DIR=output" >> .env
 
       - name: 运行每日自选股报告
         run: python main.py daily --file watchlist.txt --push
 
       - name: 上传生成的报告
+        if: always()  # 即使某只股票失败，也保留已生成的报告
         uses: actions/upload-artifact@v4
         with:
           name: daily-reports
           path: output/
           retention-days: 7
+          if-no-files-found: ignore
