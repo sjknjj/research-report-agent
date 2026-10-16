@@ -21,5 +21,8 @@
 
   "data_sources": ["akshare"],
   "auto_failover": true,
-  "cross_check_enabled": true
+  "cross_check_enabled": true,
+  "mcp_server_url": "",
+
+  "rag_min_score": 0.15
 }
