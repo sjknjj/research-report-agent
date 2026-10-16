@@ -175,7 +175,6 @@ class OfflineResponder:
 
     def _company_brief(self, ctx: Dict[str, Any]) -> str:
         name = ctx.get("name", "公司")
-        symbol = ctx.get("symbol", "")
         period = ctx.get("period", "—")
         fin = ctx.get("financial", {})
         price = ctx.get("price", {})

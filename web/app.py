@@ -21,14 +21,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 logger = logging.getLogger("web.app")
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
-from pydantic import BaseModel
+# 下面的 import 必须在 sys.path 调整之后，故忽略 E402
+from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi.responses import HTMLResponse, StreamingResponse  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
 
-from src.agent.orchestrator import ResearchOrchestrator
-from src.common.config import get_settings
-from src.export.exporter import export_assistant, export_report
-from src.services.research_assistant import ResearchAssistant
+from src.agent.orchestrator import ResearchOrchestrator  # noqa: E402
+from src.common.config import get_settings  # noqa: E402
+from src.export.exporter import export_assistant, export_report  # noqa: E402
+from src.services.research_assistant import ResearchAssistant  # noqa: E402
 
 app = FastAPI(title="研报辅助 Agent 3.9", version="3.9")
 
@@ -665,7 +666,14 @@ async function startBrief(){
     el.innerHTML = renderMD(d.text || '');
     if(d.verification && d.verification.passed !== undefined){
       const v=d.verification;
-      el.innerHTML += `<hr><p style="color:#6b7280;font-size:13px;">交叉校验：${v.passed?'✅ 通过':'⚠️ 未通过'}｜一致${v.supported}、矛盾${v.mismatch}、幻觉率${(v.hallucination_rate*100).toFixed(1)}%</p>`;
+      // T1：三态结论，覆盖率不足时明确显示"通过但有保留"
+      const mark = v.verdict==='pass' ? '✅' : (v.verdict==='fail' ? '❌' : '⚠️');
+      const text = v.verdict_text || (v.passed?'通过':'未通过');
+      const cov = (v.coverage!==undefined) ? (v.coverage*100).toFixed(0)+'%' : '—';
+      el.innerHTML += `<hr><p style="color:#6b7280;font-size:13px;">交叉校验：${mark} ${escapeHTML(text)}｜一致${v.supported}、矛盾${v.mismatch}、无来源${v.unsourced||0}、覆盖率${cov}、幻觉率${(v.hallucination_rate*100).toFixed(1)}%</p>`;
+      if(v.verdict_reasons && v.verdict_reasons.length){
+        el.innerHTML += `<ul style="color:#b45309;font-size:13px;">${v.verdict_reasons.map(r=>'<li>'+escapeHTML(r)+'</li>').join('')}</ul>`;
+      }
     }
     // 显示操作按钮
     document.getElementById('brief_actions').style.display = 'flex';
@@ -739,7 +747,10 @@ async function startAnnounce(){
     el.innerHTML = renderMD(d.text || '');
     if(d.verification && d.verification.passed !== undefined){
       const v = d.verification;
-      el.innerHTML += `<hr><p style="color:#6b7280;font-size:13px;">交叉校验：${v.passed?'✅ 通过':'⚠️ 未通过'}｜幻觉率${(v.hallucination_rate*100).toFixed(1)}%</p>`;
+      const mark = v.verdict==='pass' ? '✅' : (v.verdict==='fail' ? '❌' : '⚠️');
+      const text = v.verdict_text || (v.passed?'通过':'未通过');
+      const cov = (v.coverage!==undefined) ? (v.coverage*100).toFixed(0)+'%' : '—';
+      el.innerHTML += `<hr><p style="color:#6b7280;font-size:13px;">交叉校验：${mark} ${escapeHTML(text)}｜无来源${v.unsourced||0}、覆盖率${cov}、幻觉率${(v.hallucination_rate*100).toFixed(1)}%</p>`;
     }
   }catch(e){el.textContent='请求失败：'+e;}
 }

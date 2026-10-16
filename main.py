@@ -244,14 +244,20 @@ def cmd_brief(args) -> int:
     print()
     print(_color("=" * 64, _C.DIM))
     print(_color(title, _C.BOLD, _C.CYAN))
-    pass_color = _C.GREEN if v.get('passed') else _C.RED
+    # T1：三态结论——覆盖率不足/无来源过多时不显示"通过"
+    verdict = v.get("verdict") or ("pass" if v.get("passed") else "fail")
+    verdict_text = v.get("verdict_text") or ("通过" if v.get("passed") else "未通过")
+    pass_color = {"pass": _C.GREEN, "review": _C.YELLOW}.get(verdict, _C.RED)
     print(
         _color("交叉校验：", _C.BOLD) +
-        _color(f"{'通过' if v.get('passed') else '未通过'}", pass_color) +
+        _color(verdict_text, pass_color) +
         f"｜一致 {v.get('supported', 0)}、矛盾 {v.get('mismatch', 0)}、"
-        f"待核 {v.get('unverifiable', 0)}、幻觉率 " +
+        f"待核 {v.get('unverifiable', 0)}、无来源 {v.get('unsourced', 0)}、"
+        f"覆盖率 {v.get('coverage', 0):.0%}、幻觉率 " +
         _color(f"{v.get('hallucination_rate', 0):.1%}", _C.YELLOW)
     )
+    for reason in (v.get("verdict_reasons") or []):
+        print(_color("  · " + reason, _C.YELLOW))
     for path in files:
         print(_color("✅ 已生成：", _C.GREEN) + str(path))
     print(_color("=" * 64, _C.DIM))
