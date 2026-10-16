@@ -133,8 +133,10 @@ def chain_graph_html(chain_info: Optional[dict], highlight_code: str = "") -> st
     fig = go.Figure(
         data=[edge_trace] + node_traces,
         layout=go.Layout(
-            title=f"{chain_info['chain']}产业链图谱（交互式）",
-            titlefont_size=16,
+            # 注意：新版本 plotly 已移除 `titlefont_size`，改用 title.font.size；
+            # 旧写法会让有产业链的标的（如 600519）在生成速览时直接抛 ValueError。
+            title=dict(text=f"{chain_info['chain']}产业链图谱（交互式）",
+                       font=dict(size=16)),
             showlegend=True,
             hovermode="closest",
             margin=dict(b=20, l=5, r=5, t=40),

@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -27,10 +28,19 @@ from ..llm.client import LLMClient, LLMError
 from ..rag.vector_store import VectorStore
 from ..verify.facts import FactBase
 from ..verify.semantic_check import SemanticChecker
-from ..verify.statements import check_statements
+from ..verify.statements import (
+    TABLE_ALIASES,
+    check_statements,
+    normalize_statement_row,
+)
 from ..verify.verifier import CrossVerifier
 
 logger = get_logger("services.assistant")
+
+# F3：离线行业快照的数据文件（统计值必须与该 CSV 一一对应，而非硬编码）
+_SAMPLE_INDUSTRY_CSV = (
+    Path(__file__).resolve().parents[2] / "data" / "samples" / "sample_industry_raw.csv"
+)
 
 _BRIEF_SYSTEM = (
     "你是一名严谨的 A 股投研分析师。请严格依据用户给出的【已核实数据包】撰写公司投研速览，"
@@ -200,14 +210,21 @@ class ResearchAssistant:
         except Exception as exc:  # noqa: BLE001
             logger.warning("向量库写入/保存失败（不影响主流程）：%s", exc)
 
-        # 三大报表勾稽校验（v3.8新增）
+        # 三大报表勾稽校验（v3.8新增；F2：字段映射健壮化 + 字段级诊断留痕）
         statements_report = None
         statements_error = ""
+        statements_tables: Dict[str, Any] = {}
+        statements_diagnostic: Optional[str] = None
         statements_skipped = self.settings.effective_mode == "offline"
         if statements_skipped:
             # 离线模式必须直接跳过：不发网络请求，也不伪造结果
             logger.info("离线模式跳过三大报表勾稽校验（不发起网络请求）")
         else:
+            table_names = (
+                ("balance", "资产负债表"),
+                ("income", "利润表"),
+                ("cashflow", "现金流量表"),
+            )
             try:
                 import akshare as ak
 
@@ -215,64 +232,39 @@ class ResearchAssistant:
                 sina_symbol = self._to_sina_symbol(symbol)
                 logger.info("三大报表勾稽：标的 %s → %s", symbol, sina_symbol)
 
-                # 三张表分别抓取，单张失败不影响其它两张
+                # 三张表分别抓取，单张失败不影响其它两张；失败原因逐表留痕
                 frames: Dict[str, Any] = {}
-                for attr, table_name in (
-                    ("balance", "资产负债表"),
-                    ("income", "利润表"),
-                    ("cashflow", "现金流量表"),
-                ):
+                fetch_errors: Dict[str, str] = {}
+                for attr, table_name in table_names:
                     try:
                         frames[attr] = ak.stock_financial_report_sina(
                             stock=sina_symbol, symbol=table_name
                         )
                     except Exception as exc:  # noqa: BLE001
                         frames[attr] = None
+                        fetch_errors[attr] = f"抓取{table_name}失败：{exc}"
                         logger.warning("抓取%s失败（%s）：%s", table_name, sina_symbol, exc)
 
-                def _df_to_dict(df, col_map):
-                    if df is None or (hasattr(df, "empty") and df.empty):
-                        return {}
-                    latest = df.iloc[0]  # 第一行是最新期
-                    result = {}
-                    for cn_name, en_name in col_map.items():
-                        if cn_name in latest.index:
-                            val = latest[cn_name]
-                            try:
-                                result[en_name] = float(val)
-                            except (ValueError, TypeError):
-                                pass
-                    return result
-
-                balance = _df_to_dict(frames.get("balance"), {
-                    "资产总计": "total_assets",
-                    "负债合计": "total_liabilities",
-                    "所有者权益(或股东权益)合计": "total_equity",
-                })
-                income = _df_to_dict(frames.get("income"), {
-                    "营业收入": "revenue",
-                    "营业总成本": "operating_cost",
-                    "营业利润": "operating_profit",
-                    "利润总额": "total_profit",
-                    "所得税费用": "income_tax",
-                    "净利润": "net_profit",
-                })
-                cashflow = _df_to_dict(frames.get("cashflow"), {
-                    "期初现金及现金等价物余额": "begin_cash",
-                    "期末现金及现金等价物余额": "end_cash",
-                    "经营活动产生的现金流量净额": "net_op_cash",
-                    "投资活动产生的现金流量净额": "net_inv_cash",
-                    "筹资活动产生的现金流量净额": "net_fin_cash",
-                })
-
-                statements_report = check_statements(
-                    balance=balance, income=income, cashflow=cashflow
+                statements_report, statements_tables = self._parse_statement_frames(
+                    frames, fetch_errors
                 )
+                statements_diagnostic = self._statements_diagnostic(statements_tables)
+                if statements_diagnostic:
+                    # 缺科目不是“数据不足”这么简单，必须留下可人工核对的具体线索
+                    logger.warning("三大报表勾稽字段诊断：%s", statements_diagnostic)
+                if statements_tables and all(t.get("error") for t in statements_tables.values()):
+                    statements_error = "三张报表均未成功获取或解析失败"
 
                 # 把勾稽结果加到报告末尾
                 if statements_report.items:
                     st_text = "\n\n---\n\n📋 **三大报表勾稽校验**\n\n"
-                    st_text += f"勾稽结论：{'✅ 通过' if statements_report.passed else '⚠️ 未通过'}\n\n"
+                    # 三态结论：缺科目时显示"部分通过"，而不是笼统的"通过"
+                    st_verdict = getattr(statements_report, "verdict", None) or (
+                        "pass" if statements_report.passed else "fail")
+                    st_icon = {"pass": "✅", "partial": "⚠️"}.get(st_verdict, "❌")
+                    st_text += f"勾稽结论：{st_icon} {statements_report.verdict_text}\n\n"
+                    if statements_diagnostic:
+                        st_text += f"> ⚠️ {statements_diagnostic}\n\n"
                     for item in statements_report.items:
                         # 缺科目的跳过项不是"不通过"，用 ⚪ 区分，避免误导
                         if not getattr(item, "checked", True):
@@ -282,7 +274,7 @@ class ResearchAssistant:
                         st_text += f"- {icon} **{item.name}**：{item.detail}\n"
                     final_text = final_text + st_text
                 else:
-                    statements_error = "接口返回的报表未包含可校验科目"
+                    statements_error = statements_error or "接口返回的报表未包含可校验科目"
                     logger.warning("三大报表勾稽：%s", statements_error)
             except Exception as exc:  # noqa: BLE001
                 statements_error = str(exc)
@@ -302,6 +294,15 @@ class ResearchAssistant:
                 "statements": statements_report.to_dict() if statements_report else None,
                 "statements_skipped": statements_skipped,
                 "statements_error": statements_error or None,
+                # F2：字段级诊断——区分“接口抓取失败”与“列名对不上/数值脏”
+                "statements_tables": statements_tables or None,
+                "statements_diagnostic": statements_diagnostic,
+                "statements_matched_fields": self._collect_statement_fields(
+                    statements_tables, "matched"),
+                "statements_missing_fields": self._collect_statement_fields(
+                    statements_tables, "missing"),
+                "statements_unparsable_fields": self._collect_statement_fields(
+                    statements_tables, "unparsable"),
             },
         )
 
@@ -377,7 +378,9 @@ class ResearchAssistant:
         report = self.verifier.verify(draft, fact_base)
         best_text, best_report = draft, report
         for round_idx in range(self.repair_rounds):
-            if best_report.passed:
+            # 重写只针对“数字与事实矛盾”，不用严格的 passed：
+            # passed 将扩展为“无矛盾且覆盖率达标”的三态判定，覆盖率不足不应触发无意义重写。
+            if not best_report.has_mismatch:
                 break
             logger.warning("第 %d 轮发现 %d 处数字矛盾，回填纠错值重写",
                            round_idx + 1, best_report.n_mismatch)
@@ -423,6 +426,92 @@ class ResearchAssistant:
             return f"bj{digits}"
         return f"sh{digits}"
 
+    # -- F2：三大报表字段解析与诊断 -----------------------------------
+    @staticmethod
+    def _parse_statement_frames(
+        frames: Dict[str, Any],
+        fetch_errors: Optional[Dict[str, str]] = None,
+    ):
+        """把三张报表 DataFrame 解析为勾稽校验输入，并返回字段级诊断。
+
+        返回 ``(StatementCheckReport, tables)``。``tables`` 按表记录：
+        ``fetched``（是否拿到数据）、``error``（失败原因）、
+        ``matched``/``missing``/``unparsable``（中文科目）、
+        ``columns``（中文科目 → 接口实际列名）、``methods``（匹配方式）。
+        这样上层能区分“接口抓取失败”与“接口列名变化/数值脏”，而不是笼统报“数据不足”。
+        """
+        fetch_errors = fetch_errors or {}
+        values: Dict[str, Dict[str, Any]] = {"balance": {}, "income": {}, "cashflow": {}}
+        tables: Dict[str, Dict[str, Any]] = {}
+        for attr, table_name in (
+            ("balance", "资产负债表"),
+            ("income", "利润表"),
+            ("cashflow", "现金流量表"),
+        ):
+            df = frames.get(attr)
+            diag: Dict[str, Any] = {
+                "table": table_name,
+                "fetched": False,
+                "error": fetch_errors.get(attr),
+                "matched": [],
+                "missing": [],
+                "unparsable": [],
+                "columns": {},
+                "methods": {},
+            }
+            if df is None or (hasattr(df, "empty") and df.empty):
+                diag["error"] = diag["error"] or f"{table_name}接口未返回数据或返回空表"
+            else:
+                try:
+                    latest = df.iloc[0]  # 第一行是最新期
+                    row = {str(k): v for k, v in latest.items()}
+                    normalized = normalize_statement_row(row, TABLE_ALIASES[attr])
+                    values[attr] = dict(normalized.values)
+                    diag["fetched"] = True
+                    diag.update(normalized.to_diagnostics())
+                except Exception as exc:  # noqa: BLE001
+                    diag["error"] = f"{table_name}解析失败：{exc}"
+            tables[attr] = diag
+
+        report = check_statements(
+            balance=values["balance"], income=values["income"], cashflow=values["cashflow"]
+        )
+        return report, tables
+
+    @staticmethod
+    def _statements_diagnostic(tables: Dict[str, Any]) -> Optional[str]:
+        """汇总字段级诊断；缺科目时给出明确、可执行的人工核对提示。"""
+        missing: List[str] = []
+        unparsable: List[str] = []
+        for attr in ("balance", "income", "cashflow"):
+            diag = tables.get(attr) or {}
+            missing.extend(diag.get("missing") or [])
+            unparsable.extend(diag.get("unparsable") or [])
+        missing = list(dict.fromkeys(missing))          # 去重且保持顺序
+        unparsable = list(dict.fromkeys(unparsable))
+
+        parts: List[str] = []
+        if missing:
+            parts.append(
+                "未获取到以下科目：" + "、".join(missing)
+                + "（该接口字段可能变化，建议人工核对）"
+            )
+        if unparsable:
+            parts.append(
+                "以下科目已匹配到列名但数值无法解析（可能为 --/空值），已按缺失处理："
+                + "、".join(unparsable)
+            )
+        return "；".join(parts) if parts else None
+
+    @staticmethod
+    def _collect_statement_fields(tables: Dict[str, Any], key: str) -> List[str]:
+        """按表汇总 ``matched``/``missing``/``unparsable`` 字段（去重、保持顺序）。"""
+        out: List[str] = []
+        for attr in ("balance", "income", "cashflow"):
+            diag = tables.get(attr) or {}
+            out.extend(diag.get(key) or [])
+        return list(dict.fromkeys(out))
+
     @staticmethod
     def _find_col(columns: List[str], *keywords: str) -> Optional[str]:
         for col in columns:
@@ -430,18 +519,14 @@ class ResearchAssistant:
                 return col
         return None
 
-    def _industry_snapshot(self, industry_name: str):
-        try:
-            df = self.data.get_industry_constituents(industry_name)
-        except DataSourceError as exc:
-            logger.warning("行业实时接口不可用，使用样例快照：%s", exc)
-            return self._sample_industry_snapshot(industry_name)
-
+    @staticmethod
+    def _aggregate_industry_df(df):
+        """从板块成分 DataFrame 计算聚合统计与展示表格（在线/样例共用同一口径）。"""
         cols = list(df.columns)
-        code_col = self._find_col(cols, "代码")
-        name_col = self._find_col(cols, "名称")
-        pct_col = self._find_col(cols, "涨跌幅")
-        mv_col = self._find_col(cols, "总市值")
+        code_col = ResearchAssistant._find_col(cols, "代码")
+        name_col = ResearchAssistant._find_col(cols, "名称")
+        pct_col = ResearchAssistant._find_col(cols, "涨跌幅")
+        mv_col = ResearchAssistant._find_col(cols, "总市值")
         pct = pd.to_numeric(df[pct_col], errors="coerce") if pct_col else pd.Series(dtype=float)
         stats = {
             "count": int(len(df)),
@@ -456,17 +541,44 @@ class ResearchAssistant:
             )
         show_cols = [c for c in [code_col, name_col, pct_col, mv_col] if c]
         table = df[show_cols].head(20).to_string(index=False)
+        return stats, table
+
+    def _industry_snapshot(self, industry_name: str):
+        try:
+            df = self.data.get_industry_constituents(industry_name)
+        except DataSourceError as exc:
+            logger.warning("行业实时接口不可用，使用样例快照：%s", exc)
+            return self._sample_industry_snapshot(industry_name)
+
+        stats, table = self._aggregate_industry_df(df)
         return stats, table, False
 
     @staticmethod
     def _sample_industry_snapshot(industry_name: str):
+        """离线演示快照：优先读取 ``data/samples/sample_industry_raw.csv`` 并据此计算。
+
+        F3：统计值不再硬编码，而是与仓库里的样例 CSV 一一对应；
+        仅当 CSV 缺失或损坏时才退回极简内置兜底，并在日志中说明。
+        """
+        try:
+            if _SAMPLE_INDUSTRY_CSV.exists():
+                df = pd.read_csv(_SAMPLE_INDUSTRY_CSV, dtype=str)
+                stats, table = ResearchAssistant._aggregate_industry_df(df)
+                stats["note"] = (
+                    "实时板块接口不可用，此为离线演示快照（读自 "
+                    f"{_SAMPLE_INDUSTRY_CSV.name}，非真实行情）"
+                )
+                return stats, table, True
+            logger.warning("离线行业样例文件不存在（%s），退回内置极简兜底", _SAMPLE_INDUSTRY_CSV)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读取离线行业样例失败（%s），退回内置极简兜底：%s",
+                           _SAMPLE_INDUSTRY_CSV, exc)
+
+        # 极简兜底：明确标注无数据，绝不冒充真实行情
         stats = {
-            "count": 3, "up_count": 2, "avg_pct": 0.82, "median_pct": 0.65,
-            "leaders": "样本A(+1.62%)、样本B(+0.65%)、样本C(+0.19%)",
-            "note": "实时板块接口不可用，此为离线演示快照（非真实行情）",
+            "count": 0, "up_count": 0, "avg_pct": None, "median_pct": None,
+            "leaders": "",
+            "note": "离线样例文件缺失，无可用板块快照（非真实行情）",
         }
-        table = (
-            "代码    名称     涨跌幅(%)\n"
-            "000001  样本A    1.62\n000002  样本B    0.65\n000003  样本C    0.19"
-        )
+        table = "（离线样例文件缺失，无成分明细）"
         return stats, table, True

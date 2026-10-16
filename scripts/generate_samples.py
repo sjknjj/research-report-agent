@@ -4,9 +4,11 @@
 运行：
     python scripts/generate_samples.py
 
-产物：data/samples/{sample_price_raw.csv,sample_financial_raw.csv,sample_news_raw.csv}
+产物：data/samples/{sample_price_raw.csv,sample_financial_raw.csv,sample_news_raw.csv,
+sample_industry_raw.csv}
 这些样例为**虚构演示数据，不对应任何真实证券**，用于在无网络/未安装 akshare 时
-跑通“抓取→清洗→分析→交叉校验”全流程。
+跑通“抓取→清洗→分析→交叉校验”全流程。其中 sample_industry_raw.csv 同时作为
+离线行业汇总（F3 数据驱动）的数据源。
 """
 from __future__ import annotations
 
@@ -105,12 +107,34 @@ def gen_news() -> pd.DataFrame:
     return pd.DataFrame(rows, columns=cols)
 
 
+def gen_industry() -> pd.DataFrame:
+    """行业板块成分样例（F3）：列名对齐 AKShare 行业成分接口。
+
+    名称一律使用“演示银行X”，代码使用 DEMOxx，避免冒用任何真实上市公司或证券。
+    离线行业汇总（ResearchAssistant._sample_industry_snapshot）直接读取本文件计算，
+    因此这里的数值即离线演示时展示的数值。
+    """
+    data = [
+        ("DEMO01", "演示银行A", 2.35, 8500.0),
+        ("DEMO02", "演示银行B", 1.62, 7600.0),
+        ("DEMO03", "演示银行C", 0.88, 6900.0),
+        ("DEMO04", "演示银行D", 0.35, 5200.0),
+        ("DEMO05", "演示银行E", 0.00, 4800.0),
+        ("DEMO06", "演示银行F", -0.42, 4300.0),
+        ("DEMO07", "演示银行G", -0.95, 3600.0),
+        ("DEMO08", "演示银行H", -1.28, 3100.0),
+    ]
+    cols = ["代码", "名称", "涨跌幅", "总市值"]
+    return pd.DataFrame(data, columns=cols)
+
+
 def main() -> None:
     SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
     outputs = {
         "sample_price_raw.csv": gen_price(),
         "sample_financial_raw.csv": gen_financial(),
         "sample_news_raw.csv": gen_news(),
+        "sample_industry_raw.csv": gen_industry(),
     }
     for name, df in outputs.items():
         path = SAMPLE_DIR / name
