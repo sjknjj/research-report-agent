@@ -26,6 +26,10 @@ Actions, an MCP server, RAG retrieval, and a FastAPI web UI (13 tabs).
 
 ## Anti-hallucination: what it actually does
 
+> **No system can guarantee an error-free report.** The goal here is **"zero
+> unlabelled uncertainty"** — surface what the system could not verify instead of
+> handing you a blanket "pass".
+
 Four defences, **fully active on the company-brief and announcement paths**
 (those have a known target company, so a `FactBase` can be built):
 
@@ -34,19 +38,32 @@ Four defences, **fully active on the company-brief and announcement paths**
    - `supported` / `mismatch` / `unverifiable` when the number maps to a known metric;
    - **`unsourced`** when it cannot be tied to the fact base at all — these are
      listed explicitly instead of being silently ignored.
-   1% tolerance for amounts, 0.1pp for percentages. YoY *and* QoQ values keep their
-   sign; thousands separators are supported; facts are indexed by reporting period.
+   Tolerance is **tiered by metric importance**: core metrics (revenue, net profit,
+   EPS, ROE, margins, YoY/QoQ growth) use 0.5% / 0.06pp, others 1% / 0.1pp.
+   Thousands separators **and Chinese numerals** (`一百五十二点三亿元`,
+   `百分之四十二点三`) are supported; facts are indexed by reporting period.
 3. **Semantic faithfulness check** — an LLM flags claims not supported by the
    fact pack (online mode only).
-4. **Logic review & citation grounding** — accounting-identity checks
-   (assets = liabilities + equity, etc.), **in-report contradiction detection**,
-   and, for the deep report, **citation grounding**: every number in the body must
-   appear in the source it cites.
+4. **Logic review & citation grounding** — accounting-identity checks in three
+   states (pass / partial when line items are missing / fail), **in-report
+   contradiction detection**, and, for the deep report, **citation grounding**:
+   every number in the body must appear in the source it cites.
 
-Reported alongside the verdict: **`coverage`** (supported ÷ all financial
-numbers), the **unsourced list**, **internal contradictions**, and
-**`confidence_reasons`** — coverage below 60%/30%, a high unsourced ratio, or
-internal contradictions automatically downgrade the confidence grade.
+### Three-state verdict (no more false sense of safety)
+
+The old verdict only asked "is there a mismatch?", so a report whose numbers were
+**all unsourced** still displayed "pass". Now:
+
+| Verdict | Trigger |
+|---|---|
+| ✅ **pass** | No mismatch, coverage ≥60%, unsourced ≤30%, unverifiable ≤50%, no contradictions |
+| ⚠️ **pass with caveats (human review required)** | No mismatch, but any of the above is not met — reasons are listed |
+| ❌ **fail** | A number contradicts the fact base |
+
+Reported alongside: **`coverage`**, the **unsourced list**, **internal
+contradictions**, and **`confidence_reasons`**. Confidence grades
+(A <5% / B 5–15% / C 15–30% / D >30%) are downgraded automatically by coverage,
+unsourced ratio and contradictions.
 
 > ⚠️ **Scope caveat:** the **deep report** (`report`) is topic-based research with
 > no target company, so there is no `FactBase`. It uses **citation grounding**
@@ -54,9 +71,13 @@ internal contradictions automatically downgrade the confidence grade.
 > "🛡️ Anti-hallucination overview" states which checks actually ran and marks the
 > rest as "not enabled"; when nothing ran, confidence is "unrated".
 
-> ℹ️ "Unsourced" does not mean "hallucinated" — it means *the system could not
-> verify it*. Those numbers still need a human eye. Years, ticker codes and plain
-> counts ("5 companies") are excluded from the coverage denominator.
+> ❌ **Out of scope** (state this openly): fabricated entities/dates/events
+> (non-numeric claims), "right numbers but wrong conclusion" reasoning errors,
+> the trustworthiness of the *sources* themselves, and errors in the fact base
+> itself. "Unsourced" means *the system could not verify it* — not that it is wrong.
+
+> ℹ️ Years, ticker codes and plain counts ("5 companies") are excluded from the
+> coverage denominator.
 
 ---
 
@@ -159,10 +180,24 @@ Tools: `get_stock_brief(symbol)`, `verify_numbers(text, symbol)`,
 ## Tests
 
 ```bash
-python -m pytest tests/ -q
+python -m pytest tests/ -q      # 288 tests
 ```
 
 All tests run offline — no network and no API key required.
+
+---
+
+## Known limitations
+
+| Item | Status |
+|---|---|
+| Wind / Choice / iFinD / JQData / RiceQuant / Tushare | Require paid terminals/accounts — **cannot be verified in this repo**. Choice/iFinD adapters use non-official package names and likely need rewriting. |
+| MCP data source | Protocol + code implemented with offline tests, **not yet tested against a real MCP server**. |
+| Push channels | Signature/request construction verified, **not tested against real webhooks**. |
+| GitHub Actions | Workflow fixed, **never executed on a real repo**. |
+| Docker image | Dockerfile fixed (includes CJK fonts), **never built/verified here**. |
+| Semantic check | Requires an online LLM; skipped offline. |
+| RAG | Relevance threshold added, but **source truthfulness is not verified**. |
 
 ---
 
