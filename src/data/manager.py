@@ -183,7 +183,10 @@ def build_manager_from_config(config: Optional[Dict[str, Any]] = None) -> DataSo
             if name == "tushare":
                 kwargs["token"] = os.getenv("TUSHARE_TOKEN", "")
             if name == "mcp":
-                kwargs["server_url"] = os.getenv("MCP_SERVER_URL", "")
+                # 优先用 config.json 里的 mcp_server_url，其次回退环境变量 MCP_SERVER_URL
+                kwargs["server_url"] = (
+                    config.get("mcp_server_url") or os.getenv("MCP_SERVER_URL", "")
+                )
 
             source = build_data_source(name, **kwargs)
             sources.append(source)
@@ -212,6 +215,8 @@ def build_manager_from_settings(settings: Optional[Any] = None) -> Optional[Data
 
     **未配置任何数据源时返回 None**（调用方保持单数据源行为，避免平白多打网络请求）。
     """
+    mcp_server_url = getattr(settings, "mcp_server_url", "") if settings is not None else ""
+
     raw_sources = getattr(settings, "data_sources", None) if settings is not None else None
     if isinstance(raw_sources, str):
         raw_sources = [item.strip() for item in raw_sources.split(",") if item.strip()]
@@ -233,5 +238,6 @@ def build_manager_from_settings(settings: Optional[Any] = None) -> Optional[Data
             "sources": list(raw_sources),
             "cross_check_enabled": bool(cross_check),
             "auto_failover": bool(auto_failover),
+            "mcp_server_url": mcp_server_url,
         }
     )

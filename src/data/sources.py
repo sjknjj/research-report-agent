@@ -10,7 +10,11 @@
 """
 from __future__ import annotations
 
+import http.client
+import json
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime
 from typing import Optional
 
@@ -312,32 +316,342 @@ class TushareSource(DataSourceBase):
         return self.ts.stock_basic(ts_code=ts_code)
 
 
+# ============================================================
+# MCP 客户端数据源（JSON-RPC 2.0 over HTTP）
+# ============================================================
+MCP_PROTOCOL_VERSION = "2024-11-05"
+
+# 外部 MCP Server 若返回英文列名，统一映射回 AKShare 的中文口径，
+# 这样 src/data/cleaner.py 的 PRICE_COLUMN_MAP / FINANCIAL_COLUMN_MAP 才能识别。
+_MCP_PRICE_COLUMNS = {
+    "date": "日期",
+    "trade_date": "日期",
+    "symbol": "股票代码",
+    "open": "开盘",
+    "close": "收盘",
+    "high": "最高",
+    "low": "最低",
+    "volume": "成交量",
+    "amount": "成交额",
+    "amplitude": "振幅",
+    "pct_change": "涨跌幅",
+    "change": "涨跌额",
+    "turnover": "换手率",
+    "turnover_rate": "换手率",
+}
+_MCP_FINANCIAL_COLUMNS = {
+    "period": "报告期",
+    "report_date": "报告期",
+    "revenue": "营业总收入",
+    "revenue_yoy": "营业总收入同比增长率",
+    "net_profit": "归母净利润",
+    "net_profit_yoy": "净利润同比增长率",
+    "net_profit_deducted": "扣非净利润",
+    "net_profit_deducted_yoy": "扣非净利润同比增长率",
+    "eps": "基本每股收益",
+    "bps": "每股净资产",
+    "gross_margin": "销售毛利率",
+    "net_margin": "销售净利率",
+    "roe": "净资产收益率",
+    "debt_ratio": "资产负债率",
+}
+
+
+def _rename_mcp_columns(df: pd.DataFrame, mapping: dict) -> pd.DataFrame:
+    """按映射把英文列名改成中文口径；若目标列已存在则跳过，避免产生重名列。"""
+    rename = {
+        raw: std
+        for raw, std in mapping.items()
+        if raw in df.columns and std not in df.columns
+    }
+    return df.rename(columns=rename) if rename else df
+
+
 class MCPSource(DataSourceBase):
-    """通过 MCP 协议接外部数据源（v3.7新增）。
+    """通过 MCP 协议接外部数据源（JSON-RPC 2.0 over HTTP）。
 
     用法：
-    1. 你有一个外部的 MCP Server（比如别的金融数据MCP）
-    2. 在配置里指定 MCP Server 的地址
-    3. 我们通过 MCP 协议调用它的工具取数
+    1. 你有一个外部的 MCP Server（比如别的金融数据 MCP，暴露
+       ``stock_price_daily`` / ``stock_financial_abstract`` / ``stock_stock_info`` 等工具）；
+    2. 在 ``config.json`` 的 ``data_source`` 段或 ``.env`` 里把 ``MCP_SERVER_URL``
+       指向该 Server 的 HTTP 端点（形如 ``http://127.0.0.1:8000/mcp``）；
+    3. 把 ``mcp`` 加进 ``data_sources`` 列表即可，本项目通过 MCP 协议调用它的工具取数。
 
-    注意：目前是占位实现，所有方法都会抛出 DataSourceError；
-    配置数据源时请把它放在其它可用数据源之后作为“不可用占位”。
+    协议流程（惰性初始化，首次取数时才握手）：
+    - ``initialize``（``protocolVersion=2024-11-05``）；
+    - ``notifications/initialized``（通知不带 id，也不等待响应，失败仅记日志）；
+    - ``tools/call``，参数 ``{"name": "<tool_prefix><tool>", "arguments": {...}}``。
+
+    工具名约定：``{tool_prefix}price_daily`` / ``{tool_prefix}financial_abstract`` /
+    ``{tool_prefix}stock_info``。取数失败一律抛 :class:`DataSourceError`，交给
+    ``DataSourceManager`` 做容灾切换。
     """
 
     name = "mcp"
 
-    def __init__(self, server_url: str = "", tool_prefix: str = "stock_"):
-        self.server_url = server_url
-        self.tool_prefix = tool_prefix
+    def __init__(
+        self,
+        server_url: str = "",
+        tool_prefix: str = "stock_",
+        timeout: float = 15.0,
+    ):
+        self.server_url = str(server_url or "").strip()
+        self.tool_prefix = str(tool_prefix or "")
+        try:
+            self.timeout = float(timeout)
+        except (TypeError, ValueError):
+            self.timeout = 15.0
+        self._initialized = False  # 是否已完成 initialize 握手（惰性）
+        self._request_id = 0       # JSON-RPC 自增 id
 
-    def price_daily(self, symbol: str, start_date: str, end_date: str, adjust: str = "qfq"):
-        raise DataSourceError("MCPSource 目前是占位实现，请用 AKShare 或 Tushare")
+    # -- 连接与握手 ---------------------------------------------------------
+    def _ensure_url(self) -> None:
+        """server_url 是必填项；缺失时给出可直接照做的中文提示。"""
+        if not self.server_url:
+            raise DataSourceError(
+                "MCPSource 未配置 server_url：请在 .env 或 config.json 里设置 "
+                "MCP_SERVER_URL（例如 http://127.0.0.1:8000/mcp）后重试"
+            )
 
-    def financial_abstract(self, symbol: str):
-        raise DataSourceError("MCPSource 目前是占位实现，请用 AKShare 或 Tushare")
+    def _post(self, method: str, params: Optional[dict] = None, *, notify: bool = False):
+        """发一个 JSON-RPC 2.0 请求，返回 ``result``；通知类请求返回 None。
 
-    def stock_info(self, symbol: str):
-        raise DataSourceError("MCPSource 目前是占位实现，请用 AKShare 或 Tushare")
+        所有网络/协议异常都转成带 URL 与原因的 :class:`DataSourceError`。
+        """
+        self._ensure_url()
+        payload = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            payload["params"] = params
+        if not notify:
+            self._request_id += 1
+            payload["id"] = self._request_id
+
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            self.server_url,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as resp:  # noqa: S310 - 地址由用户显式配置
+                raw = resp.read()
+        except urllib.error.HTTPError as exc:
+            raise DataSourceError(
+                f"MCP Server 返回 HTTP {exc.code}：{exc.reason}（{self.server_url}）"
+            ) from exc
+        except (OSError, http.client.HTTPException) as exc:
+            # URLError / TimeoutError / socket.timeout / 连接被拒绝 / 协议层报错都走这里
+            reason = getattr(exc, "reason", None) or exc
+            raise DataSourceError(
+                f"无法连接 MCP Server（{self.server_url}）：{reason}"
+            ) from exc
+
+        if notify:
+            # 通知按规范不需要（也不等待）响应，哪怕 server 返回空体也直接忽略
+            return None
+
+        try:
+            text = raw.decode("utf-8")
+        except (UnicodeDecodeError, AttributeError) as exc:
+            raise DataSourceError(
+                f"MCP Server 返回的内容无法按 UTF-8 解码（{self.server_url}）：{exc}"
+            ) from exc
+        if not text.strip():
+            raise DataSourceError(f"MCP Server 返回空响应（{self.server_url}）")
+
+        try:
+            message = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise DataSourceError(
+                f"MCP Server 返回非 JSON 响应（{self.server_url}）：{text[:200]}"
+            ) from exc
+        if not isinstance(message, dict):
+            raise DataSourceError(
+                f"MCP 响应不是 JSON-RPC 对象（{self.server_url}）：{text[:200]}"
+            )
+
+        error = message.get("error")
+        if error:
+            if isinstance(error, dict):
+                code = error.get("code")
+                msg = error.get("message")
+            else:
+                code, msg = None, str(error)
+            raise DataSourceError(
+                f"MCP Server 返回 JSON-RPC 错误：code={code}, message={msg}"
+                f"（{self.server_url}）"
+            )
+
+        if "result" not in message:
+            raise DataSourceError(
+                f"MCP 响应缺少 result 字段（{self.server_url}）：{text[:200]}"
+            )
+        return message["result"]
+
+    def _ensure_initialized(self) -> None:
+        """首次取数前完成一次 MCP 握手（initialize + initialized 通知）。"""
+        if self._initialized:
+            return
+        result = self._post(
+            "initialize",
+            {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "research-report-agent", "version": "3.7.0"},
+            },
+        )
+        if not isinstance(result, dict):
+            raise DataSourceError(
+                f"MCP initialize 返回结构异常（{self.server_url}）：{str(result)[:200]}"
+            )
+        # 通知不带 id，也不等待响应；server 不接受时不应影响取数
+        try:
+            self._post("notifications/initialized", None, notify=True)
+        except DataSourceError as exc:
+            logger.warning("MCP initialized 通知发送失败（已忽略）：%s", exc)
+        self._initialized = True
+
+    # -- 工具调用与结果解析 -------------------------------------------------
+    def _call_tool(self, tool_name: str, arguments: dict) -> pd.DataFrame:
+        """调用一个 MCP 工具并把返回的 JSON 文本解析成 DataFrame。"""
+        self._ensure_url()
+        self._ensure_initialized()
+        full_name = f"{self.tool_prefix}{tool_name}"
+        result = self._post("tools/call", {"name": full_name, "arguments": arguments})
+        return self._result_to_frame(result, full_name)
+
+    @staticmethod
+    def _first_text(result: dict) -> Optional[str]:
+        """取 ``result.content[0].text``，结构不符返回 None。"""
+        content = result.get("content")
+        if not isinstance(content, list) or not content:
+            return None
+        first = content[0]
+        if isinstance(first, dict):
+            text = first.get("text")
+        elif isinstance(first, str):
+            text = first
+        else:
+            text = None
+        if not isinstance(text, str) or not text.strip():
+            return None
+        return text
+
+    @staticmethod
+    def _payload_to_frame(payload) -> pd.DataFrame:
+        """把工具返回的 JSON 载荷转成 DataFrame（列表 / 带 data 字段的对象 / 单行对象）。"""
+        if isinstance(payload, list):
+            return pd.DataFrame(payload)
+        if isinstance(payload, dict):
+            for key in ("data", "records", "rows", "items", "result"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return pd.DataFrame(value)
+                if isinstance(value, dict):
+                    return pd.DataFrame([value])
+            if not payload:
+                return pd.DataFrame()
+            # 单行记录：{"date": "...", "open": 1.23, ...}
+            if all(not isinstance(v, (list, dict)) for v in payload.values()):
+                return pd.DataFrame([payload])
+            return pd.DataFrame(payload)
+        raise DataSourceError(
+            f"MCP 工具返回的 JSON 无法转为表格：{str(payload)[:200]}"
+        )
+
+    def _result_to_frame(self, result, tool_name: str) -> pd.DataFrame:
+        if not isinstance(result, dict):
+            raise DataSourceError(
+                f"MCP 工具 {tool_name} 返回结构异常：result 不是对象"
+                f"（{self.server_url}）"
+            )
+        if result.get("isError"):
+            detail = self._first_text(result) or ""
+            raise DataSourceError(
+                f"MCP 工具 {tool_name} 执行失败：{detail[:200]}（{self.server_url}）"
+            )
+        text = self._first_text(result)
+        if text is None:
+            raise DataSourceError(
+                f"MCP 工具 {tool_name} 返回缺少 result.content[0].text"
+                f"（{self.server_url}）"
+            )
+        try:
+            payload = json.loads(text)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise DataSourceError(
+                f"MCP 工具 {tool_name} 返回的内容不是合法 JSON：{text[:200]}"
+                f"（{self.server_url}）"
+            ) from exc
+
+        df = self._payload_to_frame(payload)
+        if df is None or df.empty:
+            raise DataSourceError(
+                f"MCP 工具 {tool_name} 返回空数据（{self.server_url}）"
+            )
+        return df
+
+    @staticmethod
+    def _to_info_frame(df: pd.DataFrame) -> pd.DataFrame:
+        """个股信息统一成 AKShare 的 item/value 两列长表（供 clean_info 使用）。"""
+        columns = [str(c) for c in df.columns]
+        lowered = {c.strip().lower(): c for c in columns}
+        if "item" in lowered and "value" in lowered:
+            return df.rename(columns={lowered["item"]: "item", lowered["value"]: "value"})
+
+        chinese = {
+            "项目": "item", "名称": "item", "指标": "item",
+            "值": "value", "数值": "value",
+        }
+        matched = {c: chinese[c.strip()] for c in columns if c.strip() in chinese}
+        if "item" in matched.values() and "value" in matched.values():
+            return df.rename(columns=matched)
+
+        # 宽表（通常只有一行）→ item/value 长表
+        if len(columns) >= 2 and len(df) >= 1:
+            row = df.iloc[0]
+            return pd.DataFrame(
+                {
+                    "item": columns,
+                    "value": [str(row[c]) for c in df.columns],
+                }
+            )
+        return df
+
+    # -- DataSourceBase 接口 ------------------------------------------------
+    def price_daily(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        adjust: str = "qfq",
+    ) -> pd.DataFrame:
+        """A 股日线行情（列名对齐 AKShare 中文口径）。"""
+        df = self._call_tool(
+            "price_daily",
+            {
+                "symbol": symbol,
+                "start_date": start_date,
+                "end_date": end_date,
+                "adjust": adjust,
+            },
+        )
+        return _rename_mcp_columns(df, _MCP_PRICE_COLUMNS)
+
+    def financial_abstract(self, symbol: str) -> pd.DataFrame:
+        """财务摘要（列名对齐 AKShare 中文口径）。"""
+        df = self._call_tool("financial_abstract", {"symbol": symbol})
+        return _rename_mcp_columns(df, _MCP_FINANCIAL_COLUMNS)
+
+    def stock_info(self, symbol: str) -> pd.DataFrame:
+        """个股基本信息，统一为 item/value 两列长表。"""
+        df = self._call_tool("stock_info", {"symbol": symbol})
+        return self._to_info_frame(df)
 
 
 class OfflineSource(DataSourceBase):
