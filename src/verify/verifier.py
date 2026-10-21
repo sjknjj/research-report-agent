@@ -71,7 +71,10 @@ def tol_for(metric: str, kind: str) -> float:
 # 数值：支持千分位与正负号
 _NUMPAT = r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
 # 指标名与数值之间允许出现的“无歧义”连接词/分隔符
-_CONN = (r"(?:\s|[:：,，、;；()（）]|"
+# 注意：必须容纳 Markdown 的 **加粗** / `代码` / _斜体_ 标记。
+# 模型写报告时几乎总是 `销售毛利率 **29.99%**`，标记符号夹在中间，
+# 旧版连接符里没有 `*`，于是这类最规范的写法反而一个都抽不到。
+_CONN = (r"(?:\s|[:：,，、;；()（）*_`~]|"
          r"达到|收于|降至|升至|录得|实现|实际为|实际|约为|大约|共计|合计|"
          r"为|是|约|报|达|至)*")
 _AMOUNT_RE = re.compile(_CONN + r"(" + _NUMPAT + r")\s*(万亿|亿|万)\s*元?")
@@ -153,6 +156,12 @@ METRICS: List[MetricSpec] = [
     MetricSpec("latest_pct", "最新单日涨跌幅", "percent",
                ["最新单日涨跌幅", "当日涨跌幅", "单日涨跌幅"]),
     MetricSpec("period_return", "区间涨跌幅", "percent", ["区间涨跌幅", "累计涨跌幅"]),
+    # 均线：事实包里一直有（"20 日均线：86.89"），词典里却没有，
+    # 报告引用它就成了"无来源"——把词典补上，模型写对的东西才不会被冤枉
+    MetricSpec("ma5", "5日均线", "price",
+               ["5日均线", "5 日均线", "MA5", "五日均线"]),
+    MetricSpec("ma20", "20日均线", "price",
+               ["20日均线", "20 日均线", "MA20", "二十日均线"]),
     # 这三项事实库里本来就有，此前不在词典里，导致报告引用它们时被误判成"无来源"
     MetricSpec("period_high", "区间最高价", "price",
                ["区间最高价", "区间最高"], unit_required=True),
@@ -689,26 +698,38 @@ class CrossVerifier:
                 continue
             if any(abs(mention.start - pos) <= 2 for pos in claimed_positions):
                 continue
+            # 先按期精确匹配：文中若写明了报告期（"2026-03-31 的 20.29%"），
+            # 就在该期的事实里找，比全局撞值可靠得多
             matched_fact = None
-            for fact in all_facts:
-                if fact is None or fact.value is None:
-                    continue
-                if self._value_matches_fact(mention, fact):
-                    matched_fact = fact
-                    break
+            matched_from_period = False
+            ctx_period = self._context_period(mention.context)
+            if ctx_period and fact_base is not None:
+                bucket = getattr(fact_base, "facts_by_period", {}).get(ctx_period) or {}
+                for fact in bucket.values():
+                    if (fact is not None and fact.value is not None
+                            and self._value_matches_fact(mention, fact)):
+                        matched_fact = fact
+                        matched_from_period = True
+                        break
+            # 没写明报告期（或该期找不到）时退到全局匹配。
+            # 百分比不走这条：3.70% 这种两位数在全局撞上毛利率/ROE 太容易，
+            # 纯靠"数值相等"就说已核实，会放过真正的指标错配。
+            if matched_fact is None and mention.kind != KIND_PERCENT:
+                for fact in all_facts:
+                    if fact is None or fact.value is None:
+                        continue
+                    if self._value_matches_fact(mention, fact):
+                        matched_fact = fact
+                        break
             item = {
                 "raw": mention.raw,
                 "value": format_number(mention.value, mention.kind),
                 "kind": mention.kind,
                 "context": mention.context.strip(),
             }
-            if matched_fact is not None and mention.kind != KIND_PERCENT:
-                # 金额/价格数值在事实库里对得上，只是文中没点名指标。
+            if matched_fact is not None and (mention.kind != KIND_PERCENT or matched_from_period):
+                # 数值在事实库里对得上，只是文中没点名指标。
                 # 这类不该算「无来源」——否则「有据可查但没点名」会被误报成「疑似编造」。
-                #
-                # 百分比**故意不放宽**：3.70% 这种两位小数的百分数在事实库里太容易
-                # 撞上一个数值（比如毛利率/Roe），纯靠数值相等就说"已核实"会放过
-                # 真正的指标错配。宁可让它留在「无来源」里等人工看一眼。
                 item["hint"] = (
                     f"数值与事实库中的「{matched_fact.label}」"
                     f"（{matched_fact.period or '最新期'}）一致，但文中未指明指标"
@@ -720,6 +741,34 @@ class CrossVerifier:
                 item["note"] = ("该数字未归因到任何已知指标，也未在事实库中找到对应值，"
                                 "无法核实（需人工复核）")
                 report.unsourced.append(item)
+
+    #: 上下文里写明的报告期（"2026-03-31" / "2026年3月31日" / "2026/3/31"）
+    _CTX_PERIOD_RE = re.compile(
+        r"(20\d{2})\s*[-/年]\s*(\d{1,2})(?:\s*[-/月]\s*(\d{1,2})\s*日?)?"
+    )
+
+    @classmethod
+    def _context_period(cls, context: str) -> str:
+        """从上下文里取出最近的一个报告期，用于"按期精确匹配"。"""
+        if not context:
+            return ""
+        matches = list(cls._CTX_PERIOD_RE.finditer(context))
+        if not matches:
+            return ""
+        m = matches[-1]
+        try:
+            month = int(m.group(2))
+        except (TypeError, ValueError):
+            return ""
+        if not 1 <= month <= 12:
+            return ""
+        if m.group(3):
+            try:
+                day = int(m.group(3))
+            except (TypeError, ValueError):
+                return ""
+            return f"{m.group(1)}-{month:02d}-{day:02d}"
+        return f"{m.group(1)}-{month:02d}"
 
     @staticmethod
     def _all_facts(fact_base) -> List[Any]:

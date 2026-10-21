@@ -160,6 +160,10 @@ class FactBase:
         add("period_low", "区间最低价", price.get("period_low"), "price", window)
         add("annual_vol", "年化波动率", price.get("annual_volatility_pct"), "percent", window)
         add("avg_turnover", "平均换手率", price.get("avg_turnover_pct"), "percent", window)
+        # 均线：事实包里本来就写了「20 日均线：86.89」，不登记成事实的话，
+        # 模型照着数据包引用它反而会被判成"无来源"
+        add("ma5", "5日均线", price.get("ma5"), "price", window)
+        add("ma20", "20日均线", price.get("ma20"), "price", window)
 
         val = self.bundle.valuation
         if val:

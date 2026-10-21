@@ -206,6 +206,54 @@ class ImplicitSourcedTest(unittest.TestCase):
         self.assertEqual(report.coverage, 1.0)
         self.assertEqual(report.unsourced_ratio, 0.0)
 
+class MarkdownEmphasisTest(unittest.TestCase):
+    """模型写报告几乎都用 `销售毛利率 **29.99%**` 这种加粗格式。
+
+    旧的连接符集合里没有 `*`，标记符号夹在指标名和数字之间，
+    于是最标准的写法反而一个都抽不到，全掉进「无来源」。
+    """
+
+    def setUp(self):
+        self.verifier = CrossVerifier()
+        self.fact_base = FactBase(_bundle())
+
+    def test_bold_percent_is_extracted(self):
+        report = self.verifier.verify("销售毛利率 **29.99%**（2026-09-30）。", self.fact_base)
+        hit = [c for c in report.claims if c["metric"] == "gross_margin"]
+        self.assertEqual(len(hit), 1)
+        self.assertEqual(hit[0]["status"], "supported")
+
+    def test_bold_amount_is_extracted(self):
+        report = self.verifier.verify("营业总收入 **13.64 亿元**。", self.fact_base)
+        hit = [c for c in report.claims if c["metric"] == "revenue"]
+        self.assertEqual(len(hit), 1)
+        self.assertEqual(hit[0]["status"], "supported")
+
+    def test_bold_price_is_extracted(self):
+        report = self.verifier.verify("20 日均线 **86.89 元**。", self.fact_base)
+        hit = [c for c in report.claims if c["metric"] == "ma20"]
+        self.assertEqual(len(hit), 1)
+
+
+class PeriodScopedImplicitTest(unittest.TestCase):
+    """写明了报告期的百分数，按该期事实精确匹配后才算「已核实」。"""
+
+    def setUp(self):
+        self.verifier = CrossVerifier()
+        self.fact_base = FactBase(_bundle())
+
+    def test_percent_with_matching_period_is_implicit(self):
+        # 2026-03-31 的毛利率确实是 3.70%
+        report = self.verifier.verify("毛利率由 2026-03-31 的 3.70% 明显抬升。", self.fact_base)
+        self.assertTrue(any("2026-03-31" in i.get("hint", "") for i in report.implicit),
+                        report.implicit)
+
+    def test_percent_with_wrong_period_stays_unsourced(self):
+        # 2025-12-31 的毛利率是 21.12%，不是 3.70% —— 不许跨期硬凑
+        report = self.verifier.verify("毛利率由 2025-12-31 的 3.70% 明显抬升。", self.fact_base)
+        self.assertEqual(len(report.implicit), 0)
+        self.assertEqual(len(report.unsourced), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
