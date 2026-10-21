@@ -1097,8 +1097,13 @@ class CrossVerifier:
         if num is None:
             return None, "", 0
         raw_num = str(m.group(1)).replace(",", "").lstrip("+-")
-        if _YEAR_RE.fullmatch(raw_num) and window[m.end(): m.end() + 1] == "年":
-            return None, "", 0
+        if _YEAR_RE.fullmatch(raw_num):
+            # 四位年份只有在后面紧跟日期分隔符时才必须排除。
+            # 旧版只看「年」，于是「跌破 20 日均线，2026-10-21」里的 2026
+            # 会被当成均线数值，判出一条根本不存在的矛盾。
+            nxt = window[m.end(): m.end() + 1]
+            if nxt in ("年", "-", "/", "月", "日", "~"):
+                return None, "", 0
         unit = m.group(2)
         if unit_required and not unit:
             return None, "", 0

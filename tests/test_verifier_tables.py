@@ -254,6 +254,22 @@ class PeriodScopedImplicitTest(unittest.TestCase):
         self.assertEqual(len(report.implicit), 0)
         self.assertEqual(len(report.unsourced), 1)
 
+class DateNotValueTest(unittest.TestCase):
+    """日期不是数值：`跌破 20 日均线，2026-10-21` 里的 2026 不能被当成均线值。"""
+
+    def setUp(self):
+        self.verifier = CrossVerifier()
+        self.fact_base = FactBase(_bundle())
+
+    def test_year_after_metric_is_not_taken_as_value(self):
+        report = self.verifier.verify("跌破 20 日均线，2026-10-21 收盘。", self.fact_base)
+        self.assertEqual(report.n_mismatch, 0)
+        self.assertFalse([c for c in report.claims if c["metric"] == "ma20" and c["status"] == "mismatch"])
+
+    def test_iso_date_is_skipped(self):
+        report = self.verifier.verify("20 日均线在 2026/10/21 被跌破。", self.fact_base)
+        self.assertEqual(report.n_mismatch, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
