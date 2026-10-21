@@ -270,6 +270,27 @@ class DateNotValueTest(unittest.TestCase):
         report = self.verifier.verify("20 日均线在 2026/10/21 被跌破。", self.fact_base)
         self.assertEqual(report.n_mismatch, 0)
 
+class PeriodRetryTest(unittest.TestCase):
+    """期间标错 ≠ 数字编造：同一指标别的报告期对得上就该放行，但要提示核对期间。"""
+
+    def setUp(self):
+        self.verifier = CrossVerifier()
+        self.fact_base = FactBase(_bundle())
+
+    def test_value_from_another_period_is_supported_with_warning(self):
+        # +38.89% 是 2025-12-31 的营收同比，文中却挂在 2026-09-30 上
+        report = self.verifier.verify("2026-09-30 营收同比 +38.89%。", self.fact_base)
+        yoy = next(c for c in report.claims if c["metric"] == "revenue_yoy")
+        self.assertEqual(yoy["status"], "supported")
+        self.assertEqual(yoy["period"], "2025-12-31")
+        self.assertIn("期间", yoy["note"])
+
+    def test_fabricated_value_still_fails(self):
+        # 任何一期都不存在的数值，仍然必须判矛盾
+        report = self.verifier.verify("2026-09-30 营收同比 +123.45%。", self.fact_base)
+        yoy = next(c for c in report.claims if c["metric"] == "revenue_yoy")
+        self.assertEqual(yoy["status"], "mismatch")
+
 
 if __name__ == "__main__":
     unittest.main()

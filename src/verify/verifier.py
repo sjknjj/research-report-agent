@@ -487,7 +487,21 @@ class CrossVerifier:
                     continue
                 seen_positions.add(claim.pos)
             fact = self._fact_for(claim, fact_base)
-            report.claims.append(self._judge(claim, fact))
+            judged = self._judge(claim, fact)
+            if judged["status"] == "mismatch":
+                # 期间归属靠上下文里的日期猜，跨句/多日期时并不可靠。
+                # 数值若与**同一指标的其它报告期**对得上，就不该判成"编造"——
+                # 那是"期间标错"，不是"数字假造"，两者性质完全不同。
+                alt = self._fact_matching_any_period(claim, fact_base)
+                if alt is not None and alt.period != getattr(fact, "period", ""):
+                    retried = self._judge(claim, alt)
+                    if retried["status"] == "supported":
+                        retried["note"] = (
+                            f"数值与「{alt.label}」（{alt.period}）一致；"
+                            "但文中标注的报告期与之不同，请核对期间是否写错"
+                        )
+                        judged = retried
+            report.claims.append(judged)
             if claim.pos >= 0:
                 claimed_positions.append(claim.pos)
         # 同一指标多处出现时全部保留（任一矛盾都要被发现）
@@ -685,6 +699,25 @@ class CrossVerifier:
                 return fact
         return fact_base.get(claim.metric)
 
+    def _fact_matching_any_period(self, claim: Claim, fact_base: FactBase):
+        """在同一指标的各个报告期里，找与 claim 数值相符的那一期。"""
+        if fact_base is None:
+            return None
+        for bucket in getattr(fact_base, "facts_by_period", {}).values():
+            fact = bucket.get(claim.metric)
+            if fact is None or fact.value is None:
+                continue
+            tol = tol_for(claim.metric, claim.kind)
+            if claim.kind == "percent":
+                if abs(claim.claimed - fact.value) <= tol + _FLOAT_EPS:
+                    return fact
+            else:
+                denom = abs(fact.value) or 1e-9
+                if (abs(claim.claimed - fact.value)
+                        <= tol * denom + self._display_slack(claim) + _FLOAT_EPS):
+                    return fact
+        return None
+
     #: 上下文里出现的报告期（"2026-03-31" / "2026年3月31日" / "2026/3/31"）
     _CTX_PERIOD_RE = re.compile(
         r"(20\d{2})\s*[-/年]\s*(\d{1,2})(?:\s*[-/月]\s*(\d{1,2})\s*日?)?"
@@ -708,12 +741,16 @@ class CrossVerifier:
 
     @classmethod
     def _period_near(cls, context: str, raw: str = "") -> str:
-        """取**离数字最近**的那个报告期。
+        """取**服务于这个数字**的报告期。
 
-        旧实现取上下文里的第一个日期，于是
-        「2026-09-30 的 11.38%。2025-12-31 归母净利润同比为 -62.06%」
-        会拿到上一句的 2026-09-30，把 -62.06 拿去和最新期的 +869.79 比，
-        凭空判出一条矛盾。
+        规则：优先用数字**之前**最近的那个日期（"2026-09-30 营收同比 +70.71%" 就是
+        这种典型写法）；前面没有日期时，才用后面最近的（"-62.06%（2025-12-31）"）。
+
+        为什么不能直接取"离得最近"：一句话里常同时出现两个日期，
+        「2026-09-30 归母净利润同比 +869.79%、营收同比 +70.71%，
+        增速处于近五期最高水平；2025-12-31 归母净利润同比为…」
+        里 2025-12-31 离前面的 70.71 反而更近，会把 +70.71% 归到错误期间。
+        为什么不能取"第一个"：上一条消息里的跨期叙述会拿到上一句的日期。
         """
         if not context:
             return ""
@@ -721,13 +758,14 @@ class CrossVerifier:
         if not matches:
             return ""
         num = cls._RAW_NUM_RE.search(raw or "")
-        anchor = -1
-        if num:
-            anchor = context.rfind(num.group(0))
+        anchor = context.rfind(num.group(0)) if num else -1
         if anchor < 0:
             return cls._period_from_match(matches[0])
-        best = min(matches, key=lambda m: abs(m.start() - anchor))
-        return cls._period_from_match(best)
+        before = [m for m in matches if m.start() <= anchor]
+        if before:
+            return cls._period_from_match(before[-1])
+        after = [m for m in matches if m.start() > anchor]
+        return cls._period_from_match(after[0])
 
     @classmethod
     def _context_period(cls, context: str, raw: str = "") -> str:
