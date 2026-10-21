@@ -667,6 +667,11 @@ class CrossVerifier:
             if fact is not None and fact.value is not None:
                 return fact
         ctx = claim.context or ""
+        period = self._period_near(ctx, claim.raw)
+        if period:
+            fact = fact_base.get_for_period(claim.metric, period)
+            if fact is not None and fact.value is not None:
+                return fact
         m = self._YEAR_IN_CTX.search(ctx)
         if m:
             period = m.group(1)
@@ -679,6 +684,55 @@ class CrossVerifier:
             if fact is not None and fact.value is not None:
                 return fact
         return fact_base.get(claim.metric)
+
+    #: 上下文里出现的报告期（"2026-03-31" / "2026年3月31日" / "2026/3/31"）
+    _CTX_PERIOD_RE = re.compile(
+        r"(20\d{2})\s*[-/年]\s*(\d{1,2})(?:\s*[-/月]\s*(\d{1,2})\s*日?)?"
+    )
+
+    @classmethod
+    def _period_from_match(cls, m) -> str:
+        try:
+            month = int(m.group(2))
+        except (TypeError, ValueError):
+            return ""
+        if not 1 <= month <= 12:
+            return ""
+        if m.group(3):
+            try:
+                day = int(m.group(3))
+            except (TypeError, ValueError):
+                return ""
+            return f"{m.group(1)}-{month:02d}-{day:02d}"
+        return f"{m.group(1)}-{month:02d}"
+
+    @classmethod
+    def _period_near(cls, context: str, raw: str = "") -> str:
+        """取**离数字最近**的那个报告期。
+
+        旧实现取上下文里的第一个日期，于是
+        「2026-09-30 的 11.38%。2025-12-31 归母净利润同比为 -62.06%」
+        会拿到上一句的 2026-09-30，把 -62.06 拿去和最新期的 +869.79 比，
+        凭空判出一条矛盾。
+        """
+        if not context:
+            return ""
+        matches = list(cls._CTX_PERIOD_RE.finditer(context))
+        if not matches:
+            return ""
+        num = cls._RAW_NUM_RE.search(raw or "")
+        anchor = -1
+        if num:
+            anchor = context.rfind(num.group(0))
+        if anchor < 0:
+            return cls._period_from_match(matches[0])
+        best = min(matches, key=lambda m: abs(m.start() - anchor))
+        return cls._period_from_match(best)
+
+    @classmethod
+    def _context_period(cls, context: str, raw: str = "") -> str:
+        """上下文里离数字最近的报告期（供"按期精确匹配"用）。"""
+        return cls._period_near(context, raw)
 
     # -- U1：未归因数字 -------------------------------------------------
     def _classify_unattributed(self, text: str, fact_base: FactBase,
@@ -702,7 +756,7 @@ class CrossVerifier:
             # 就在该期的事实里找，比全局撞值可靠得多
             matched_fact = None
             matched_from_period = False
-            ctx_period = self._context_period(mention.context)
+            ctx_period = self._context_period(mention.context, mention.raw)
             if ctx_period and fact_base is not None:
                 bucket = getattr(fact_base, "facts_by_period", {}).get(ctx_period) or {}
                 for fact in bucket.values():
@@ -741,34 +795,6 @@ class CrossVerifier:
                 item["note"] = ("该数字未归因到任何已知指标，也未在事实库中找到对应值，"
                                 "无法核实（需人工复核）")
                 report.unsourced.append(item)
-
-    #: 上下文里写明的报告期（"2026-03-31" / "2026年3月31日" / "2026/3/31"）
-    _CTX_PERIOD_RE = re.compile(
-        r"(20\d{2})\s*[-/年]\s*(\d{1,2})(?:\s*[-/月]\s*(\d{1,2})\s*日?)?"
-    )
-
-    @classmethod
-    def _context_period(cls, context: str) -> str:
-        """从上下文里取出最近的一个报告期，用于"按期精确匹配"。"""
-        if not context:
-            return ""
-        matches = list(cls._CTX_PERIOD_RE.finditer(context))
-        if not matches:
-            return ""
-        m = matches[-1]
-        try:
-            month = int(m.group(2))
-        except (TypeError, ValueError):
-            return ""
-        if not 1 <= month <= 12:
-            return ""
-        if m.group(3):
-            try:
-                day = int(m.group(3))
-            except (TypeError, ValueError):
-                return ""
-            return f"{m.group(1)}-{month:02d}-{day:02d}"
-        return f"{m.group(1)}-{month:02d}"
 
     @staticmethod
     def _all_facts(fact_base) -> List[Any]:
