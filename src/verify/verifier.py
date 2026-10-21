@@ -129,8 +129,8 @@ METRICS: List[MetricSpec] = [
                ["营业总收入同比", "营业收入同比", "营收同比", "营收增速",
                 "营业总收入增长率", "营业收入增长率", "营收增长"], yoy_anchor=True),
     MetricSpec("net_profit_yoy", "归母净利润同比增速", "percent",
-               ["归母净利润同比", "净利润同比", "净利润增速",
-                "净利润增长"], yoy_anchor=True),
+               ["归母净利润同比", "净利润同比", "净利润增速", "净利同比",
+                "归母净利同比", "净利增速", "净利润增长"], yoy_anchor=True),
     MetricSpec("net_profit_deducted_yoy", "扣非净利润同比增速", "percent",
                ["扣非净利润同比", "扣非归母净利润同比"], yoy_anchor=True),
     # U2：环比（较上期）——与同比分开，避免把"环比"当成"同比"比对
@@ -190,6 +190,7 @@ class Claim:
     raw: str
     pos: int = -1          # 数值字面量在原文中的起始下标（用于与全量抽取对齐）
     context: str = ""      # 数值附近上下文（用于分期归因）
+    period: str = ""       # 表格解析出的报告期（优先于从 context 猜）
 
 
 @dataclass
@@ -199,6 +200,10 @@ class VerificationReport:
     corrections: List[str] = field(default_factory=list)
     # U1：无法归因到任何指标、也不与事实库任何数值吻合的数字
     unsourced: List[Dict[str, Any]] = field(default_factory=list)
+    # U1b：数值与事实库**确实一致**、只是文中没写指标名的数字
+    #      （典型来源：近五期趋势表格里那一列列数字）
+    #      它们不该算"无来源"——那样会把「有据可查但没点名」误报成「疑似编造」。
+    implicit: List[Dict[str, Any]] = field(default_factory=list)
     # U1：被忽略的噪声数字（年份/代码/无单位计数），不计入覆盖率分母
     ignored_numbers: int = 0
     # U3：同一指标在文中出现多次但数值互相矛盾
@@ -219,8 +224,8 @@ class VerificationReport:
 
     @property
     def total_numbers(self) -> int:
-        """报告中需要核对的数字总数（已归因 claims + 未归因 unsourced）。"""
-        return len(self.claims) + len(self.unsourced)
+        """报告中需要核对的数字总数（已归因 claims + 未归因 unsourced + implicit）。"""
+        return len(self.claims) + len(self.unsourced) + len(self.implicit)
 
     # ---- 比率 -----------------------------------------------------------
     @property
@@ -232,17 +237,21 @@ class VerificationReport:
 
     @property
     def unsourced_ratio(self) -> float:
-        """无来源归因的数字占比（U1）。越高说明"没被检查"的数字越多。"""
+        """无来源归因的数字占比（U1）。
+
+        ``implicit`` 不计入这里：它们的数值在事实库里对得上，
+        只是文中没点名指标，属于"可核实但表述含糊"，不是"疑似编造"。
+        """
         if not self.total_numbers:
             return 0.0
         return round(len(self.unsourced) / self.total_numbers, 3)
 
     @property
     def coverage(self) -> float:
-        """可核实覆盖率 = 一致数字 / 全部数字（U1/U4）。"""
+        """可核实覆盖率 =（一致数字 + 隐式可核实数字）/ 全部数字。"""
         if not self.total_numbers:
             return 0.0
-        return round(self.n_supported / self.total_numbers, 3)
+        return round((self.n_supported + len(self.implicit)) / self.total_numbers, 3)
 
     @property
     def hallucination_rate(self) -> float:
@@ -395,6 +404,7 @@ class VerificationReport:
             "mismatch": self.n_mismatch,
             "unverifiable": self.n_unverifiable,
             "unsourced": len(self.unsourced),
+            "implicit": len(self.implicit),
             "ignored_numbers": self.ignored_numbers,
             "unverifiable_ratio": self.unverifiable_ratio,
             "unsourced_ratio": self.unsourced_ratio,
@@ -402,6 +412,7 @@ class VerificationReport:
             "hallucination_rate": self.hallucination_rate,
             "claims": self.claims,
             "unsourced_items": self.unsourced[:20],
+            "implicit_items": self.implicit[:20],
             "contradictions": self.contradictions,
             "issues": self.issues,
             "corrections": self.corrections,
@@ -413,6 +424,7 @@ class VerificationReport:
             f"可信度：{self.confidence_level}｜"
             f"共核对 {self.total_numbers} 个数字：一致 {self.n_supported}、"
             f"矛盾 {self.n_mismatch}、无法核实 {self.n_unverifiable}、"
+            f"未指明指标但已核实 {len(self.implicit)}、"
             f"无来源 {len(self.unsourced)}｜"
             f"可核实覆盖率 {self.coverage:.0%}｜"
             f"疑似幻觉率 {self.hallucination_rate:.1%}",
@@ -423,6 +435,10 @@ class VerificationReport:
         for c in self.claims:
             mark = {"supported": "✓", "mismatch": "✗", "unverifiable": "?"}[c["status"]]
             lines.append(f"  [{mark}] {c['label']}：{c['note']}")
+        if self.implicit:
+            lines.append(f"未指明指标、但数值与事实库一致（{len(self.implicit)} 个）：")
+            for item in self.implicit[:10]:
+                lines.append(f"  [≈] {item['raw']}：{item.get('hint', item['note'])}")
         if self.unsourced:
             lines.append(f"无来源数字（{len(self.unsourced)} 个，需人工复核）：")
             for item in self.unsourced[:10]:
@@ -450,9 +466,17 @@ class CrossVerifier:
     # ------------------------------------------------------------------
     def verify(self, text: str, fact_base: FactBase) -> VerificationReport:
         claims = self._extract_claims(text)
+        # 表格里的数字（"近五期趋势"那种）纯文本正则抽不到，单独按表头绑定指标
+        claims.extend(self._table_claims(text))
         report = VerificationReport()
         claimed_positions: List[int] = []
+        seen_positions = set()
         for claim in claims:
+            # 文本正则和表格解析可能命中同一个位置，只算一次
+            if claim.pos >= 0:
+                if claim.pos in seen_positions:
+                    continue
+                seen_positions.add(claim.pos)
             fact = self._fact_for(claim, fact_base)
             report.claims.append(self._judge(claim, fact))
             if claim.pos >= 0:
@@ -470,12 +494,169 @@ class CrossVerifier:
         report.contradictions = self._find_contradictions(report.claims)
         return report
 
+    # -- 表格按列头归因 ---------------------------------------------------
+    #: 表头里的单位写法 → 金额倍数
+    _UNIT_SCALE = {"万亿": 1e12, "亿": 1e8, "万": 1e4, "元": 1.0}
+    _CELL_NUM_RE = re.compile(r"([-+]?\d+(?:\.\d+)?)\s*(%|％)?")
+    _PERIOD_CELL_RE = re.compile(
+        r"^\s*((?:19|20)\d{2})\s*[-/年]?\s*(\d{1,2})?\s*[-/月]?\s*(\d{1,2})?\s*日?\s*$"
+    )
+    _UNIT_PAREN_RE = re.compile(r"[（(][^）)]*[）)]")
+
+    def _alias_index(self) -> List[Tuple[str, MetricSpec]]:
+        """(别名, 指标) 按长度从长到短排，保证"营收同比"先于"营收"命中。"""
+        pairs: List[Tuple[str, MetricSpec]] = []
+        for spec in METRICS:
+            for alias in spec.aliases:
+                pairs.append((alias, spec))
+            pairs.append((spec.label, spec))
+        pairs.sort(key=lambda x: len(x[0]), reverse=True)
+        return pairs
+
+    def _header_metric(self, cell: str):
+        """表头单元格 → (MetricSpec, 金额倍数 或 None)。
+
+        ``None`` 表示表头没写单位，交给表格上方的「单位：亿元」提示兜底。
+        """
+        text = str(cell).strip()
+        if not text:
+            return None, None
+        inner = " ".join(self._UNIT_PAREN_RE.findall(text))
+        scale = None
+        for unit, factor in self._UNIT_SCALE.items():
+            if unit in inner or unit in text:
+                scale = factor
+                break
+        core = self._UNIT_PAREN_RE.sub("", text).strip()
+        for alias, spec in self._alias_index():
+            if alias and alias in core:
+                return spec, scale
+        return None, scale
+
+    #: 表格上方的单位提示，如「**近五期趋势（单位：亿元）**」
+    _BLOCK_UNIT_RE = re.compile(r"单位\s*[:：]?\s*(万亿|亿元|万元|千元|元)")
+
+    @classmethod
+    def _block_unit_scale(cls, lines: List[str], header_idx: int) -> float:
+        """从表格上方 2 行内找「单位：亿元」这类提示。
+
+        报告的表格常常把单位写在标题行而不是表头里：
+        ``**近五期趋势（单位：亿元）**`` 下面直接就是 ``| 报告期 | 营业总收入 |``。
+        不读这一行，13.64 会被当成 13.64 元，整张表都判成"与事实不符"。
+        """
+        for back in (1, 2):
+            idx = header_idx - back
+            if idx < 0:
+                break
+            m = cls._BLOCK_UNIT_RE.search(lines[idx])
+            if m:
+                unit = m.group(1)
+                if unit == "万亿":
+                    return 1e12
+                if unit == "亿元":
+                    return 1e8
+                if unit == "万元":
+                    return 1e4
+                if unit == "千元":
+                    return 1e3
+                return 1.0
+        return 1.0
+
+    @classmethod
+    def _cell_period(cls, cell: str) -> str:
+        m = cls._PERIOD_CELL_RE.match(str(cell).strip())
+        if not m:
+            return ""
+        year, month, day = m.group(1), m.group(2), m.group(3)
+        if month and day:
+            return f"{year}-{int(month):02d}-{int(day):02d}"
+        if month:
+            return f"{year}-{int(month):02d}"
+        return year
+
+    def _table_claims(self, text: str) -> List[Claim]:
+        """从 markdown 表格按「表头→指标、首列→报告期」抽取数值声明。
+
+        报告里的「近五期趋势」是这种结构::
+
+            | 报告期 | 营业总收入(亿元) | 营收同比 | ... |
+            | 2026-09-30 | 13.64 | +70.71% | ... |
+
+        没有任何一处把"营业总收入"写在数字旁边，纯文本正则永远抽不到，
+        结果整张表的数字全被判成"无来源/无法核实"，明明数据包里就有。
+        这里按列头绑定指标、按首列绑定报告期，表格数字才真正参与核对。
+        """
+        lines = text.splitlines()
+        out: List[Claim] = []
+        offset = 0
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if not line.strip().startswith("|"):
+                offset += len(line) + 1
+                i += 1
+                continue
+            # 收集一个连续的表格块
+            header_lineno = i
+            block: List[Tuple[str, int]] = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                block.append((lines[i], offset))
+                offset += len(lines[i]) + 1
+                i += 1
+            if len(block) < 3:
+                continue
+            header_line, header_off = block[0]
+            headers = [c.strip() for c in header_line.strip().strip("|").split("|")]
+            specs = [self._header_metric(h) for h in headers]
+            # 表头没写单位时，读表格上方标题行里的「单位：亿元」
+            block_scale = self._block_unit_scale(lines, header_lineno)
+            # block[1] 是 |---| 分隔行，从 block[2] 开始是数据行
+            for row_line, row_off in block[2:]:
+                cells = row_line.strip().strip("|").split("|")
+                if len(cells) != len(headers):
+                    continue
+                period = self._cell_period(cells[0])
+                for idx in range(1, len(cells)):
+                    spec, header_scale = specs[idx] if idx < len(specs) else (None, None)
+                    if spec is None or spec.kind not in ("amount", "percent", "price"):
+                        continue
+                    cell = cells[idx]
+                    m = self._CELL_NUM_RE.search(cell)
+                    if not m:
+                        continue
+                    try:
+                        value = float(m.group(1))
+                    except ValueError:
+                        continue
+                    scale = header_scale if header_scale is not None else block_scale
+                    if spec.kind == "amount":
+                        value = value * scale
+                    # 单元格内定位绝对下标，供 _classify_unattributed 去重
+                    row_cell_off = row_off + row_line.index(cell)
+                    pos = row_cell_off + m.start(1)
+                    out.append(Claim(
+                        metric=spec.key,
+                        label=spec.label,
+                        kind=spec.kind,
+                        claimed=value,
+                        raw=cell.strip(),
+                        pos=pos,
+                        context=row_line,
+                        period=period,
+                    ))
+        return out
+
     # -- U2：分期归因（"2024年营收…"不与最新期混用）-------------------
     _YEAR_IN_CTX = re.compile(r"(20\d{2})(?:\s*[-/年]\s*(\d{1,2}))?")
 
     def _fact_for(self, claim: Claim, fact_base: FactBase):
         if fact_base is None:
             return None
+        # 表格解析出的报告期最可靠，优先使用
+        if claim.period:
+            fact = fact_base.get_for_period(claim.metric, claim.period)
+            if fact is not None and fact.value is not None:
+                return fact
         ctx = claim.context or ""
         m = self._YEAR_IN_CTX.search(ctx)
         if m:
@@ -501,30 +682,58 @@ class CrossVerifier:
         """
         if not text:
             return
-        all_facts = list(getattr(fact_base, "facts", {}).values()) if fact_base else []
+        all_facts = self._all_facts(fact_base)
         for mention in extract_numbers(text):
             if mention.kind == KIND_BARE:
                 report.ignored_numbers += 1
                 continue
             if any(abs(mention.start - pos) <= 2 for pos in claimed_positions):
                 continue
-            hint = ""
+            matched_fact = None
             for fact in all_facts:
                 if fact is None or fact.value is None:
                     continue
                 if self._value_matches_fact(mention, fact):
-                    hint = f"数值与事实库中的「{fact.label}」一致，但文中未指明指标"
+                    matched_fact = fact
                     break
-            report.unsourced.append({
+            item = {
                 "raw": mention.raw,
                 "value": format_number(mention.value, mention.kind),
                 "kind": mention.kind,
                 "context": mention.context.strip(),
-                "hint": hint,
-                "note": ("该数字未归因到任何已知指标，也未在事实库中找到对应值，"
-                         "无法核实（需人工复核）" if not hint
-                         else "该数字未被指标词典归因：" + hint),
-            })
+            }
+            if matched_fact is not None and mention.kind != KIND_PERCENT:
+                # 金额/价格数值在事实库里对得上，只是文中没点名指标。
+                # 这类不该算「无来源」——否则「有据可查但没点名」会被误报成「疑似编造」。
+                #
+                # 百分比**故意不放宽**：3.70% 这种两位小数的百分数在事实库里太容易
+                # 撞上一个数值（比如毛利率/Roe），纯靠数值相等就说"已核实"会放过
+                # 真正的指标错配。宁可让它留在「无来源」里等人工看一眼。
+                item["hint"] = (
+                    f"数值与事实库中的「{matched_fact.label}」"
+                    f"（{matched_fact.period or '最新期'}）一致，但文中未指明指标"
+                )
+                item["note"] = "数值已核实，但文中未指明对应指标（建议人工确认是哪一项）"
+                report.implicit.append(item)
+            else:
+                item["hint"] = ""
+                item["note"] = ("该数字未归因到任何已知指标，也未在事实库中找到对应值，"
+                                "无法核实（需人工复核）")
+                report.unsourced.append(item)
+
+    @staticmethod
+    def _all_facts(fact_base) -> List[Any]:
+        """事实库里**所有**可核验数值，含各报告期的分期事实。
+
+        修复前这里只取 ``fact_base.facts``（最新期），于是「近五期趋势」表格里
+        那些历史期数字全被判成"事实库里没有"，明明数据包里就摆着。
+        """
+        if not fact_base:
+            return []
+        facts = list(getattr(fact_base, "facts", {}).values())
+        for bucket in getattr(fact_base, "facts_by_period", {}).values():
+            facts.extend(bucket.values())
+        return facts
 
     def _value_matches_fact(self, mention, fact) -> bool:
         """未归因数字是否与事实库某条数值吻合（仅作为提示，不据此判定为一致）。"""
@@ -548,13 +757,18 @@ class CrossVerifier:
 
     # -- U3：报告内部自相矛盾 -------------------------------------------
     def _find_contradictions(self, claims: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """同一指标在文中出现多次、且数值超出容差地不一致 -> 自相矛盾。"""
-        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        """同一指标、**同一报告期**在文中出现多次且数值不一致 -> 自相矛盾。
+
+        必须按报告期分组：趋势表里「净利同比」2026Q3 是 +869.79%、
+        2025 年报是 -62.06%，这两个数字本来就该不同，
+        笼统按指标归组会把正常的跨期对比误报成"自相矛盾"。
+        """
+        grouped: Dict[Any, List[Dict[str, Any]]] = {}
         for c in claims:
-            grouped.setdefault(c["metric"], []).append(c)
+            grouped.setdefault((c["metric"], c.get("period") or ""), []).append(c)
 
         out: List[Dict[str, Any]] = []
-        for metric, items in grouped.items():
+        for (metric, period), items in grouped.items():
             if len(items) < 2:
                 continue
             values = [it.get("claimed") for it in items if it.get("claimed") is not None]
@@ -567,15 +781,17 @@ class CrossVerifier:
                     if not self._values_close(values[i], values[j], kind, metric):
                         conflicts.append((values[i], values[j]))
             if len(conflicts) >= 1:
+                where = f"（{period}）" if period else ""
                 out.append({
                     "metric": metric,
                     "label": items[0]["label"],
+                    "period": period,
                     "values": sorted({round(v, 4) for v in values}),
                     "count": len(items),
-                    "note": f"同一指标在文中出现 {len(items)} 次，数值不一致："
+                    "note": f"同一指标{where}在文中出现 {len(items)} 次，数值不一致："
                             + "、".join(str(v) for v in sorted({round(v, 4) for v in values})),
                 })
-        out.sort(key=lambda x: x["metric"])
+        out.sort(key=lambda x: (x["metric"], x.get("period") or ""))
         return out
 
     def _values_close(self, a: float, b: float, kind: Optional[str],
@@ -586,14 +802,48 @@ class CrossVerifier:
         denom = abs(b) or 1e-9
         return abs(a - b) / denom <= tol + _FLOAT_EPS
 
+    #: 从原文数字字面量里抠出数值（含符号与小数）
+    _RAW_NUM_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
+
+    def _display_slack(self, claim: Claim) -> float:
+        """按「写出来的小数位数」折算的绝对容差（与 ``claim.claimed`` 同单位）。
+
+        例：表格里写 ``0.09``（亿元）→ 实际值 0.091071 亿元，显示精度本身就有
+        ±0.005 亿元。若坚持 0.5% 的相对容差，这个"正确但只写了两位小数"的数字
+        会被判成矛盾。按半个最低位放大，比的才是"数字对不对"而不是"位数够不够"。
+        """
+        raw = (claim.raw or "").strip()
+        m = self._RAW_NUM_RE.search(raw)
+        if not m:
+            return 0.0
+        token = m.group(0)
+        try:
+            raw_value = float(token)
+        except ValueError:
+            return 0.0
+        if raw_value == 0:
+            return 0.0
+        decimals = len(token.split(".")[1]) if "." in token else 0
+        # claimed 与原文数字之间的倍率（元/亿元 换算后就会出现倍率）
+        scale = abs(claim.claimed / raw_value)
+        return 0.5 * (10 ** -decimals) * scale
+
     # ------------------------------------------------------------------
     def _judge(self, claim: Claim, fact) -> Dict[str, Any]:
+        # 记下比对所用事实的报告期：判断"自相矛盾"时必须按期间分组，
+        # 否则趋势表里不同期的同一指标会被当成互相打架。
         base = {"metric": claim.metric, "label": claim.label, "kind": claim.kind,
-                "claimed_raw": claim.raw, "context": claim.context}
+                "claimed_raw": claim.raw, "context": claim.context,
+                "period": getattr(fact, "period", "") if fact is not None else ""}
         if fact is None or fact.value is None:
             return {**base, "status": "unverifiable", "claimed": claim.claimed,
                     "fact": None, "note": "事实库未覆盖该指标，无法证实（需人工/更多数据源确认）",
                     "correction": ""}
+        # 显示精度带来的绝对误差：表格里写「0.09」亿元，本来就只有 ±0.005 亿的精度，
+        # 拿它去套 0.5% 的相对容差必然判成"矛盾"，那是冤枉模型。
+        #
+        # 百分比不加这层：PCT_TOL / PCT_TOL_CORE 本来就是按"保留 1~2 位小数的舍入空间"
+        # 定的，再加上显示精度补偿会重复放宽，把真的写错的百分数也放过去。
         if claim.kind == "percent":
             diff = abs(claim.claimed - fact.value)
             tol = tol_for(claim.metric, claim.kind)
@@ -602,7 +852,9 @@ class CrossVerifier:
         else:
             denom = abs(fact.value) or 1e-9
             diff = abs(claim.claimed - fact.value)
-            ok = diff / denom <= tol_for(claim.metric, claim.kind) + _FLOAT_EPS
+            ok = (diff
+                  <= tol_for(claim.metric, claim.kind) * denom
+                  + self._display_slack(claim) + _FLOAT_EPS)
 
         fact_text = self._display(claim.kind, fact.value)
         claim_text = self._display(claim.kind, claim.claimed)
