@@ -20,6 +20,40 @@ from typing import Any, Dict, List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+#: 占位符 Key 的特征串（把 ``.env.example`` 里的示例值原样留下就会命中）
+_PLACEHOLDER_KEY_MARKERS = (
+    "请替换", "你的密钥", "在这里", "填你的",
+    "your_api_key", "your-api-key", "yourkey",
+    "sk-xxx", "changeme", "placeholder", "todo",
+)
+
+
+def is_usable_api_key(key: Optional[str]) -> bool:
+    """判断 API Key 能不能真的拿去发 HTTP 请求。
+
+    有两种「看着有值、其实不能用」必须先识别出来，否则报错会非常难懂：
+
+    1. **还是占位符**：把 ``.env.example`` 的
+       ``LLM_API_KEY=sk-请替换为你的密钥`` 原样留着。``mode=auto`` 只看非空就判定在线，
+       等真正发请求时才炸。
+    2. **含非 ASCII 字符**：HTTP 头部只能装 latin-1，中文会抛
+       ``UnicodeEncodeError: 'latin-1' codec can't encode characters``，
+       接口层再包成一句看不出原因的「调用失败」。
+
+    :param key: 待检查的 key
+    :return: 是否可用于请求
+    """
+    if not key:
+        return False
+    text = key.strip()
+    if not text:
+        return False
+    # HTTP 头只支持 latin-1，任何非 ASCII 字符都会让请求在发送阶段就挂掉
+    if any(ord(ch) > 127 for ch in text):
+        return False
+    lowered = text.lower()
+    return not any(marker in lowered for marker in _PLACEHOLDER_KEY_MARKERS)
+
 
 def load_dotenv(dotenv_path: Optional[Path] = None) -> None:
     """把 .env 中的键值对写入 os.environ（不覆盖已存在的真实环境变量）。"""
@@ -135,15 +169,24 @@ class Settings:
     def is_offline(self) -> bool:
         return self.effective_mode == "offline"
 
+    @property
+    def api_key_usable(self) -> bool:
+        """当前 Key 是否真的能发请求（占位符 / 含中文都算不能）。"""
+        return is_usable_api_key(self.llm_api_key)
+
     def resolve_effective_mode(self) -> str:
-        """根据 auto 规则判定最终运行模式。"""
+        """根据 auto 规则判定最终运行模式。
+
+        ``auto`` 只认**能用的** Key：占位符（``sk-请替换为你的密钥``）和含非 ASCII
+        的 Key 一律按「没有 Key」处理，直接走离线演示，而不是先判在线、发请求时才崩。
+        """
         if self.mode == "offline":
             self.effective_mode = "offline"
         elif self.mode == "online":
-            # 显式要求在线但没有 key，则保持 online，由调用方报错提示
+            # 显式要求在线就保持 online，Key 有问题时由调用方给出明确报错
             self.effective_mode = "online"
         else:  # auto
-            self.effective_mode = "online" if self.llm_api_key else "offline"
+            self.effective_mode = "online" if self.api_key_usable else "offline"
         return self.effective_mode
 
     def to_dict(self) -> Dict[str, Any]:

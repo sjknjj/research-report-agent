@@ -473,6 +473,40 @@ Clash 这类工具转发国内行情接口时经常被对方判成风控直接�
 4. 想换顺序/加付费源，配 `data_sources`（见 10.5）；
 5. 已知限制见 README「已知限制」：付费数据源需要你自己的授权才能验证。
 
+### 10.11 点「生成」提示「调用失败」/ `latin-1 codec can't encode`？
+
+**十有八九是 `.env` 里的 `LLM_API_KEY` 没改。** 最常见的一幕：
+
+```bash
+# .env
+LLM_API_KEY=sk-请替换为你的密钥      # ← 直接照抄了 .env.example
+```
+
+`LLM_MODE=auto` 原来只看 Key **非空**就判定"在线"，于是拿这串中文去发请求，
+而 HTTP 头部只支持 latin-1，在 `http.client.putheader` 就抛
+`UnicodeEncodeError: 'latin-1' codec can't encode characters`，
+接口层再包成一句看不出原因的「调用失败」。
+
+**现在的行为**：
+
+- `auto` 模式只认**能用的** Key。占位符（`sk-请替换为…`、`your_api_key`、`sk-changeme`）
+  和含中文等非 ASCII 字符的 Key，一律按"没有 Key"处理 → **自动走离线演示**，界面能正常出报告。
+- 显式写 `LLM_MODE=online` 时不会静默降级，而是直接报一句能看懂的错：
+  「LLM_API_KEY 不可用：它要么还是 .env.example 里的占位符，要么含中文等非 ASCII 字符……」。
+
+**怎么修**：二选一
+
+```bash
+# 1) 填真实 Key（推荐，报告质量差别很大）
+LLM_API_KEY=sk-你的真实key            # 不能有中文、空格、引号
+
+# 2) 暂时用离线演示（有网络也无所谓，只用 mock）
+LLM_MODE=offline
+```
+
+> 顺带一提：换成真实 Key 后记得**重启服务**，`load_settings` 是进程内单例，
+> 改 `.env` 不会热生效。
+
 ---
 
 ## 🎉 好了，你现在会用也会看了

@@ -312,6 +312,14 @@ class LLMClient:
             raise LLMError(
                 "在线模式缺少 LLM_API_KEY，请在 .env 中配置或将 LLM_MODE 设为 offline。"
             )
+        if not self.settings.api_key_usable:
+            # 直接把病因说清楚，别让用户去猜那句 latin-1 报错
+            raise LLMError(
+                "LLM_API_KEY 不可用：它要么还是 .env.example 里的占位符"
+                "（如 sk-请替换为你的密钥），要么含中文等非 ASCII 字符——"
+                "HTTP 头部只支持 latin-1，这类 Key 会在发送阶段直接失败。"
+                "请填入真实 Key，或把 LLM_MODE 设为 offline 用离线演示模式。"
+            )
         url = self.settings.llm_base_url.rstrip("/") + "/chat/completions"
         payload = {
             "model": self.settings.llm_model,
