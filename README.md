@@ -283,9 +283,10 @@ TELEGRAM_BOT_TOKEN= / TELEGRAM_CHAT_ID=
 
   "rag_min_score": 0.15,
 
-  "data_sources": ["akshare"],
+  "data_sources": ["akshare", "sina_http", "tencent_http"],
   "auto_failover": true,
   "cross_check_enabled": true,
+  "bypass_system_proxy": true,
   "mcp_server_url": ""
 }
 ```
@@ -301,10 +302,10 @@ TELEGRAM_BOT_TOKEN= / TELEGRAM_CHAT_ID=
 
 | 类型 | 数据源 | 实测状态 |
 |---|---|---|
-| 免费 | **AKShare** | ✅ 默认启用，已实测 |
-| 免费 | 东方财富 HTTP | ✅ 已实测 |
-| 免费 | 新浪财经 HTTP | ✅ 已实测 |
-| 免费 | 腾讯财经 HTTP | ✅ 已实测 |
+| 免费 | **AKShare** | ✅ 默认第 1 顺位；内部还会按东财 → 新浪 → 腾讯降级 |
+| 免费 | 新浪财经 HTTP | ✅ 默认第 2 顺位，已实测 |
+| 免费 | 腾讯财经 HTTP | ✅ 默认第 3 顺位，已实测 |
+| 免费 | 东方财富 HTTP | ✅ 已实测（上游与 akshare 相同，不进默认顺序） |
 | 免费 | 离线样例 | ✅ 容灾兜底，已实测 |
 | 免费 | **MCP** | ⚙️ 已实现（JSON-RPC 2.0 over HTTP），未与真实外部 Server 联调 |
 | 付费 | Tushare | 🔑 需 Token，本仓库无法验证 |
@@ -314,20 +315,62 @@ TELEGRAM_BOT_TOKEN= / TELEGRAM_CHAT_ID=
 | 付费 | 聚宽 JQData | 🔑 需账号，无法验证 |
 | 付费 | 米筐 RiceQuant | 🔑 需账号，无法验证 |
 
-### 启用多数据源（容灾 + 交叉验证）
+### 两层容灾：先换接口，再换数据源
+
+「一个不行换另一个」在**零配置**下就已经生效——不用先猜到一个配置项它才动。
+
+**第一层：接口级降级**（同一个数据源内部换上游）
+
+| 数据 | 降级顺序 |
+|---|---|
+| 日线行情 | 东财 `stock_zh_a_hist` → 新浪 `stock_zh_a_daily` → 腾讯 `stock_zh_a_hist_tx` |
+| 财务摘要 | 同花顺 `stock_financial_abstract_ths` → 东财 `stock_financial_abstract` → 东财 `stock_financial_analysis_indicator` |
+| 个股信息 | 东财 `stock_individual_info_em` → 新浪实时快照 |
+
+**第二层：数据源级容灾**（换整个数据源，按免费源完备度排序）
+
+| 顺序 | 数据源 | 覆盖接口 | 上游 |
+|---|---|---|---|
+| 1 | `akshare` | 13 类 | 东财 / 同花顺 / 新浪 |
+| 2 | `sina_http` | 行情 / 财务 / 信息 | 新浪 |
+| 3 | `tencent_http` | 行情 / 信息 | 腾讯 |
+
+> `eastmoney_http` 的日线/财务/信息**与 akshare 用的是同一个东财上游**，
+> 同时启用只是重复打一遍同样的请求，所以不进默认顺序（需要时可显式配置）。
 
 ```json
 {
   "data_sources": ["akshare", "sina_http", "tencent_http"],
   "auto_failover": true,
-  "cross_check_enabled": true
+  "cross_check_enabled": true,
+  "bypass_system_proxy": true
 }
 ```
 
+- **留空 `data_sources`** = 就用上面的完备度顺序，不是"只剩 akshare 单源"。
 - **容灾切换**：主源失败自动切下一个可用源，并"粘"在可用源上，避免每次重试死掉的主源。
   覆盖**行情与财务**取数（`info/news/valuation/fund_flow` 仍是单主源、尽力而为）。
 - **多源交叉验证**：对**财务摘要口径**指标（营收/净利/同比/毛利率/净利率/ROE/PE/PB）比对各源数值，
   相对偏差超阈值时在报告中标记。
+
+### 为什么「我明明选的是 akshare」也会挂
+
+**AKShare 不是数据源，是抓取库**——它内部封装了东财、新浪、腾讯、同花顺十几个网站。
+配置里写 `"akshare"` 只表示"用这个库去抓"，抓谁由**函数**决定：
+
+```python
+# akshare/stock_feature/stock_hist_em.py  —— 文件名里的 _em 就是 East Money
+def stock_zh_a_hist(...):
+    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+```
+
+所以 `akshare` 的日线**就是东财**。东财对高频请求按 IP 限流时会直接 RST（一个字节都不回），
+日志里表现为 `RemoteDisconnected`；因为连接走了代理隧道，urllib3 还会把它误报成
+`ProxyError`——**代理其实是好的，是隧道另一头断了**。这正是上面第一层降级要解决的问题。
+
+`bypass_system_proxy`（默认 `true`）会把国内财经域名写进 `no_proxy`：
+macOS 上 `requests` 会自动读系统代理设置，**即使一个 `HTTP_PROXY` 环境变量都没有**。
+只有"必须靠代理才能出网"的环境才需要把它设成 `false`。
 
 ### MCP 数据源
 

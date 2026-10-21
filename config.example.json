@@ -19,9 +19,10 @@
   "export_formats": ["md", "html"],
   "log_level": "INFO",
 
-  "data_sources": ["akshare"],
+  "data_sources": ["akshare", "sina_http", "tencent_http"],
   "auto_failover": true,
   "cross_check_enabled": true,
+  "bypass_system_proxy": true,
   "mcp_server_url": "",
 
   "rag_min_score": 0.15

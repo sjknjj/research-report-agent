@@ -3,6 +3,11 @@
 职责：
 - 懒加载 akshare（未安装时给出可操作的安装提示，而不是裸 ImportError）；
 - 对东财/同花顺等接口常见的瞬时断连做有限次重试；
+- **接口级降级**：同一份数据备好多个上游接口，一个被限流就换下一个
+  （行情：东财 → 新浪 → 腾讯；财务：同花顺 → 东财摘要 → 东财指标；
+  个股信息：东财 → 新浪快照）；
+- **数据源级容灾**：由 :mod:`src.data.manager` 按 :data:`FREE_SOURCE_ORDER`
+  的顺序换整个数据源；
 - 统一异常为 :class:`DataSourceError`，上层据此回退到离线样例；
 - 只负责“取数”，清洗一律交给 :mod:`src.data.cleaner`。
 
@@ -12,11 +17,13 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
+import re
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -24,6 +31,83 @@ from ..common.logger import get_logger
 from . import sample_data
 
 logger = get_logger("data.sources")
+
+# ---------------------------------------------------------------------------
+# 免费数据源的完备度排序
+# ---------------------------------------------------------------------------
+#: 免费数据源按「能提供的接口种类」从多到少排序；未显式配置时，这个顺序就是默认容灾顺序。
+#:
+#: - ``akshare``      ：13 类接口（行情/财务/资讯/行业/资金流/龙虎榜/解禁/两融…），完备度最高；
+#: - ``sina_http``    ：行情 + 财务 + 实时快照，上游是新浪，与东财完全独立；
+#: - ``tencent_http`` ：行情 + 财务 + 个股信息，上游是腾讯，作为第三道免费兜底。
+#:
+#: 说明：``eastmoney_http`` 的日线/财务/信息**与 akshare 用的是同一个东财上游**，
+#: 同时启用只是重复打一遍同样的网络请求，因此不进默认顺序（需要时可显式配置）。
+FREE_SOURCE_ORDER: List[str] = ["akshare", "sina_http", "tencent_http"]
+
+#: 各免费源的能力矩阵，既是排序依据，也供文档展示。
+FREE_SOURCE_CAPABILITY: Dict[str, Dict[str, Any]] = {
+    "akshare": {
+        "interfaces": 13, "price": True, "financial": True, "info": True,
+        "news": True, "upstream": "东财 / 同花顺 / 新浪",
+    },
+    "sina_http": {
+        "interfaces": 3, "price": True, "financial": True, "info": True,
+        "news": False, "upstream": "新浪",
+    },
+    "tencent_http": {
+        "interfaces": 3, "price": True, "financial": True, "info": True,
+        "news": False, "upstream": "腾讯",
+    },
+    "eastmoney_http": {
+        "interfaces": 3, "price": True, "financial": True, "info": True,
+        "news": False, "upstream": "东财（与 akshare 同源）",
+    },
+}
+
+#: 国内财经站点域名。这些站点的行情接口经常对「经代理转发的连接」直接 RST，
+#: 而 urllib3 在 CONNECT 隧道里分不清是谁断的，会把它误报成 ``ProxyError``。
+DOMESTIC_FINANCE_HOSTS: Tuple[str, ...] = (
+    "push2his.eastmoney.com",
+    "push2.eastmoney.com",
+    "datacenter.eastmoney.com",
+    "eastmoney.com",
+    "sinajs.cn",
+    "sina.com.cn",
+    "finance.qq.com",
+    "gtimg.cn",
+    "xueqiu.com",
+    "10jqka.com.cn",
+    "hexun.com",
+    "163.com",
+)
+
+
+def bypass_system_proxy_for_domestic(enabled: bool = True) -> bool:
+    """把国内财经域名加入 ``no_proxy``，让请求直连而不是走系统代理。
+
+    背景：macOS 上 ``requests`` 会通过 SystemConfiguration 自动读取系统代理，
+    **即使一个 ``HTTP_PROXY`` 环境变量都没有**，只要系统设置里开着代理就会走。
+    东财这类国内接口经代理转发时常被风控直接掐断，报错却是
+    ``ProxyError('Unable to connect to proxy', RemoteDisconnected(...))``——
+    把锅甩给了本来好好的代理。
+
+    :param enabled: 传 False 表示不动环境变量（用户确实需要代理才能出网时用）
+    :return: 是否真的写入了 ``no_proxy``
+    """
+    if not enabled:
+        return False
+    changed = False
+    for key in ("no_proxy", "NO_PROXY"):
+        existing = os.environ.get(key, "")
+        hosts = [item.strip() for item in existing.split(",") if item.strip()]
+        added = [host for host in DOMESTIC_FINANCE_HOSTS if host not in hosts]
+        if added:
+            os.environ[key] = ",".join(hosts + added)
+            changed = True
+    if changed:
+        logger.debug("已为 %d 个国内财经域名设置 no_proxy", len(DOMESTIC_FINANCE_HOSTS))
+    return changed
 
 
 class DataSourceError(RuntimeError):
@@ -91,6 +175,142 @@ def _retryable_call(func, retry: int = 3, backoff: float = 1.5, label: str = "",
                 )
                 time.sleep(wait)
     raise DataSourceError(f"{label or '接口'} 重试 {retry} 次仍失败：{last_exc}")
+
+
+# ---------------------------------------------------------------------------
+# 备用接口 → 标准列名的适配器
+# ---------------------------------------------------------------------------
+# 东财「财务摘要」用「指标」做行、报告期做列，同花顺是「一行一期」。
+# 只有转成同一口径，cleaner.FINANCIAL_COLUMN_MAP 才认得出来。
+_EM_ABSTRACT_ALIAS = {
+    "归母净利润": "归母净利润",
+    "营业总收入": "营业总收入",
+    "净利润": "净利润",
+    "扣非净利润": "扣非净利润",
+    "基本每股收益": "基本每股收益",
+    "每股净资产": "每股净资产",
+    "每股经营现金流": "每股经营现金流",
+    "每股现金流": "每股经营现金流",
+    "净资产收益率(ROE)": "净资产收益率",
+    "毛利率": "销售毛利率",
+    "销售净利率": "销售净利率",
+    "资产负债率": "资产负债率",
+}
+
+_EM_INDICATOR_ALIAS = {
+    "摊薄每股收益(元)": "基本每股收益",
+    "每股收益_调整后(元)": "基本每股收益",
+    "每股净资产_调整后(元)": "每股净资产",
+    "每股经营性现金流(元)": "每股经营现金流",
+    "销售毛利率(%)": "销售毛利率",
+    "销售净利率(%)": "销售净利率",
+    "净资产收益率(%)": "净资产收益率",
+    "主营业务收入增长率(%)": "营业总收入同比增长率",
+    "净利润增长率(%)": "净利润同比增长率",
+    "资产负债率(%)": "资产负债率",
+}
+
+_DATE_COLUMNS = ("date", "日期", "报告期", "报告日", "时间")
+
+
+def _slice_by_date(
+    df: pd.DataFrame, start_date: Optional[str], end_date: Optional[str]
+) -> pd.DataFrame:
+    """把日线切到 [start_date, end_date] 区间。
+
+    东财接口自带日期参数，但新浪/腾讯的备用接口返回全量历史，
+    不切片会让「区间涨跌幅」这类统计悄悄变成全历史口径。
+    """
+    if df is None or df.empty or not start_date or not end_date:
+        return df
+    date_col = next((c for c in _DATE_COLUMNS if c in df.columns), None)
+    if date_col is None:
+        return df
+    try:
+        dates = pd.to_datetime(df[date_col], errors="coerce")
+        start = pd.to_datetime(str(start_date), errors="coerce")
+        end = pd.to_datetime(str(end_date), errors="coerce")
+    except (TypeError, ValueError):
+        return df
+    if pd.isna(start) or pd.isna(end):
+        return df
+    sliced = df[(dates >= start) & (dates <= end)]
+    # 切完为空说明两端口径对不上，宁可返回原表交给 cleaner 判断，也不交白卷
+    return sliced if not sliced.empty else df
+
+
+def _adapt_em_financial_abstract(df: pd.DataFrame) -> pd.DataFrame:
+    """东财·财务摘要（指标 × 报告期 长表）→ 同花顺式「一行一期」宽表。"""
+    if df is None or df.empty or "指标" not in df.columns:
+        return pd.DataFrame()
+    period_cols = [c for c in df.columns if re.fullmatch(r"\d{8}", str(c))]
+    if not period_cols:
+        return pd.DataFrame()
+    # 同一指标会在「常用指标 / 盈利能力 / …」多个分组里重复，保留第一次出现的
+    table = df.drop_duplicates(subset=["指标"], keep="first").set_index("指标")[period_cols]
+    wide = table.T.rename_axis("报告期").reset_index()
+    wide.columns = [_EM_ABSTRACT_ALIAS.get(str(c), str(c)) for c in wide.columns]
+    return wide
+
+
+def _adapt_em_financial_indicator(df: pd.DataFrame) -> pd.DataFrame:
+    """东财·财务指标（``日期`` + 超宽百分比列）→ 标准列名。
+
+    注意：这个接口**没有**营业收入/净利润的绝对金额，只有增长率与比率。
+    它只是财务链的最后一道兜底——能填的填上，填不了的诚实留空，
+    绝不为了「看起来完整」去编一个数字。
+    """
+    if df is None or df.empty or "日期" not in df.columns:
+        return pd.DataFrame()
+    picked: Dict[str, Any] = {"报告期": df["日期"]}
+    for raw, std in _EM_INDICATOR_ALIAS.items():
+        if raw in df.columns and std not in picked:
+            picked[std] = df[raw]
+    if len(picked) <= 1:
+        return pd.DataFrame()
+    return pd.DataFrame(picked)
+
+
+_SINA_INCOME_ALIAS = {
+    "报告日": "报告期",
+    "营业总收入": "营业总收入",
+    "净利润": "净利润",
+    "归属于母公司所有者的净利润": "归母净利润",
+    "基本每股收益": "基本每股收益",
+}
+
+
+def _adapt_sina_income_statement(df: pd.DataFrame) -> pd.DataFrame:
+    """新浪·利润表 → 财务摘要口径。
+
+    这个接口只给得出营收/净利/EPS，没有同比与比率——那就留空，
+    不做任何「补齐」，否则幻觉就是从这种地方钻进来的。
+    """
+    if df is None or df.empty or "报告日" not in df.columns:
+        return pd.DataFrame()
+    picked: Dict[str, Any] = {}
+    for raw, std in _SINA_INCOME_ALIAS.items():
+        if raw in df.columns and std not in picked:
+            picked[std] = df[raw]
+    if "报告期" not in picked:
+        return pd.DataFrame()
+    return pd.DataFrame(picked)
+
+
+def _spot_as_info(ak, symbol: str, retry: int = 3, backoff: float = 1.5) -> pd.DataFrame:
+    """全市场快照 → 该股票的 item/value 两列长表（供 stock_info 降级用）。"""
+    df = _retryable_call(ak.stock_zh_a_spot, retry, backoff, "实时行情快照")
+    code_col = next((c for c in ("代码", "symbol", "代码编号") if c in df.columns), None)
+    if code_col is None:
+        raise DataSourceError("实时行情快照缺少代码列，无法定位个股")
+    row = df[df[code_col].astype(str).str.contains(str(symbol), na=False)]
+    if row.empty:
+        raise DataSourceError(f"实时行情快照中未找到 {symbol}")
+    record = row.iloc[0]
+    return pd.DataFrame({
+        "item": [str(c) for c in record.index],
+        "value": [str(record[c]) for c in record.index],
+    })
 
 
 class DataSourceBase:
@@ -161,6 +381,33 @@ class AKShareSource(DataSourceBase):
                     time.sleep(wait)
         raise DataSourceError(f"接口 {func_name} 重试 {self.retry} 次仍失败：{last_exc}")
 
+    # -- 接口级降级 ---------------------------------------------------------
+    def _call_first(
+        self, candidates: List[Tuple[str, str, Dict[str, Any], Any]]
+    ) -> pd.DataFrame:
+        """按顺序尝试多个接口，第一个「取到数且适配后非空」的胜出。
+
+        免费接口被限流时通常不是全挂，而是某个上游先挂——所以单个数据源内部
+        也要能换接口，而不是一换就得换整个数据源。
+
+        :param candidates: ``[(说明, akshare 函数名, 关键字参数, 适配器或 None)]``
+        """
+        errors: List[str] = []
+        for label, func_name, kwargs, adapter in candidates:
+            try:
+                raw = self._call(func_name, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - 逐个降级，失败就换下一个
+                errors.append(f"{label} -> {exc}")
+                logger.warning("接口降级：%s 不可用，换下一个接口（%s）", label, exc)
+                continue
+            data = adapter(raw) if adapter is not None else raw
+            if data is None or (hasattr(data, "empty") and data.empty):
+                errors.append(f"{label} -> 适配后为空")
+                logger.warning("接口降级：%s 适配后为空，换下一个接口", label)
+                continue
+            return data
+        raise DataSourceError("所有候选接口均失败：" + "；".join(errors))
+
     # -- 行情 ---------------------------------------------------------------
     def price_daily(
         self,
@@ -169,28 +416,76 @@ class AKShareSource(DataSourceBase):
         end_date: str,
         adjust: str = "qfq",
     ) -> pd.DataFrame:
-        """A 股日线行情（前复权）。日期格式 YYYYMMDD。"""
-        return self._call(
-            "stock_zh_a_hist",
-            symbol=symbol,
-            period="daily",
-            start_date=start_date,
-            end_date=end_date,
-            adjust=adjust,
-        )
+        """A 股日线行情（前复权）。日期格式 YYYYMMDD。
+
+        按「东财 → 新浪 → 腾讯」依次降级：东财被限流时自动换新浪，
+        新浪也失败再换腾讯，任一成功即返回。
+        """
+        prefix = _exchange_suffix(symbol, "prefix")
+        df = self._call_first([
+            (
+                "东财日线 stock_zh_a_hist",
+                "stock_zh_a_hist",
+                {
+                    "symbol": symbol, "period": "daily",
+                    "start_date": start_date, "end_date": end_date, "adjust": adjust,
+                },
+                None,
+            ),
+            (
+                "新浪日线 stock_zh_a_daily",
+                "stock_zh_a_daily",
+                {"symbol": prefix, "adjust": adjust},
+                None,
+            ),
+            (
+                "腾讯日线 stock_zh_a_hist_tx",
+                "stock_zh_a_hist_tx",
+                {
+                    "symbol": prefix,
+                    "start_date": start_date, "end_date": end_date, "adjust": adjust,
+                },
+                None,
+            ),
+        ])
+        # 新浪/腾讯返回全量历史，这里统一切片，保证区间口径与东财一致
+        return _slice_by_date(df, start_date, end_date)
 
     # -- 财务 ---------------------------------------------------------------
     def financial_abstract(self, symbol: str) -> pd.DataFrame:
-        """同花顺·财务摘要（按报告期，中文单位）。"""
-        return self._call(
-            "stock_financial_abstract_ths",
-            symbol=symbol,
-            indicator="按报告期",
-        )
+        """财务摘要：同花顺 → 东财摘要 → 东财指标，依次降级。
+
+        三个接口的原始结构完全不同，靠适配器统一成
+        :data:`FINANCIAL_COLUMN_MAP` 认得的「一行一期」口径。
+        """
+        return self._call_first([
+            (
+                "同花顺财务摘要 stock_financial_abstract_ths",
+                "stock_financial_abstract_ths",
+                {"symbol": symbol, "indicator": "按报告期"},
+                None,
+            ),
+            (
+                "东财财务摘要 stock_financial_abstract",
+                "stock_financial_abstract",
+                {"symbol": symbol},
+                _adapt_em_financial_abstract,
+            ),
+            (
+                "东财财务指标 stock_financial_analysis_indicator",
+                "stock_financial_analysis_indicator",
+                {"symbol": symbol},
+                _adapt_em_financial_indicator,
+            ),
+        ])
 
     def stock_info(self, symbol: str) -> pd.DataFrame:
-        """东财·个股信息（两列长表）。"""
-        return self._call("stock_individual_info_em", symbol=symbol)
+        """个股信息：东财 → 新浪实时快照，依次降级。"""
+        try:
+            return self._call("stock_individual_info_em", symbol=symbol)
+        except Exception as exc:  # noqa: BLE001 - 东财不可用就换新浪快照再试一次
+            logger.warning("接口降级：东财个股信息不可用，换新浪实时快照（%s）", exc)
+        return _spot_as_info(self.ak, symbol, self.retry, self.backoff)
 
     # -- 资讯 ---------------------------------------------------------------
     def company_news(self, symbol: str, limit: int = 10) -> pd.DataFrame:
@@ -773,39 +1068,28 @@ class SinaHttpSource(DataSourceBase):
         )
 
     def financial_abstract(self, symbol: str):
-        # 新浪版财务
+        """新浪·利润表 → 财务摘要口径。
+
+        修复前取的是**资产负债表**——里面根本没有营收和净利润，
+        而且列名是 ``报告日``，``clean_financial`` 会直接抛「缺少报告期列」，
+        等于这条备源一直是死的。改用利润表后，营收/净利/EPS 都能对上，
+        也才有可能和东财做真正的交叉验证。
+        """
         try:
-            return _retryable_call(
+            raw = _retryable_call(
                 self.ak.stock_financial_report_sina, self.retry, self.backoff,
-                "新浪财务", stock=symbol, symbol="资产负债表",
+                "新浪利润表", stock=symbol, symbol="利润表",
             )
         except Exception as exc:
             raise DataSourceError(f"新浪财务接口取数失败：{exc}")
+        adapted = _adapt_sina_income_statement(raw)
+        if adapted.empty:
+            raise DataSourceError("新浪利润表字段不兼容，未能转成财务摘要口径")
+        return adapted
 
     def stock_info(self, symbol: str):
-        """新浪实时行情，**过滤出该股票**并整理为 item/value 两列长表。
-
-        修复前返回的是东财全市场快照（``stock_zh_a_spot_em``），
-        会被 clean_info 当成该股票的信息拼成垃圾。
-        """
-        df = _retryable_call(
-            self.ak.stock_zh_a_spot, self.retry, self.backoff, "新浪实时行情",
-        )
-        code_col = next(
-            (c for c in ("代码", "symbol", "代码编号") if c in df.columns), None
-        )
-        if code_col is None:
-            raise DataSourceError("新浪实时行情缺少代码列，无法定位个股")
-        row = df[df[code_col].astype(str).str.contains(str(symbol), na=False)]
-        if row.empty:
-            raise DataSourceError(f"新浪实时行情中未找到 {symbol}")
-        record = row.iloc[0]
-        return pd.DataFrame(
-            {
-                "item": [str(c) for c in record.index],
-                "value": [str(record[c]) for c in record.index],
-            }
-        )
+        """新浪实时行情，**过滤出该股票**并整理为 item/value 两列长表。"""
+        return _spot_as_info(self.ak, symbol, self.retry, self.backoff)
 
 
 class TencentHttpSource(DataSourceBase):
@@ -839,14 +1123,27 @@ class TencentHttpSource(DataSourceBase):
         )
 
     def financial_abstract(self, symbol: str):
-        # 腾讯财务接口暂未接入
-        raise DataSourceError("腾讯财务接口暂未接入，用东财或新浪")
+        """腾讯没有可用的免费财务摘要接口，如实抛错让上层换源。
+
+        硬接一个「看起来像财务」的接口只会污染清洗与交叉验证，
+        宁可让它明确失败，也不要它返回一份对不上的数据。
+        """
+        raise DataSourceError("腾讯财务接口暂未接入，请用 akshare 或 sina_http")
 
     def stock_info(self, symbol: str):
-        return _retryable_call(
-            self.ak.stock_individual_basic_info_xq, self.retry, self.backoff,
-            "腾讯个股信息", symbol=symbol,
-        )
+        """个股信息：雪球 → 全市场快照，依次降级。
+
+        雪球接口现在需要 ``xq_a_token``（匿名访问返回 400016），
+        所以真正兜底的其实是快照过滤，雪球只在有 token 时才能用。
+        """
+        try:
+            return _retryable_call(
+                self.ak.stock_individual_basic_info_xq, self.retry, self.backoff,
+                "雪球个股信息", symbol=symbol,
+            )
+        except Exception as exc:  # noqa: BLE001 - 雪球要登录，换快照
+            logger.warning("接口降级：雪球个股信息不可用，换实时快照（%s）", exc)
+        return _spot_as_info(self.ak, symbol, self.retry, self.backoff)
 
 
 # ============================================================

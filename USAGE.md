@@ -146,7 +146,8 @@ python main.py serve --port 8080  # 端口被占用时换一个
 ### 🏠 1. 首页（公司投研速览）
 
 1. 输入股票代码（如 `600519` 贵州茅台）；
-2. 「数据源选择」：默认勾 AKShare；**勾多个会启用容灾切换 + 财务口径交叉验证**；
+2. 「数据源选择」：默认勾 AKShare；**勾多个会启用容灾切换 + 财务口径交叉验证**
+   （不勾也已经按 `akshare → sina_http → tencent_http` 自动容灾）；
 3. 点「生成速览」。
 
 **报告内容**：速览仪表盘、行情与财务、技术面信号、**交叉校验报告**、
@@ -405,14 +406,44 @@ python main.py daily
 
 ### 10.5 怎么提高覆盖率？
 
-在 `config.json` 里配多个数据源（或 `.env` 里设 `DATA_SOURCES=akshare,sina_http,tencent_http`）：
+**不用改配置**——默认就按免费源完备度顺序启用了三个源（`akshare → sina_http → tencent_http`），
+并且每个源内部还会自己换接口。想显式写死顺序就这样配：
 
 ```json
 { "data_sources": ["akshare", "sina_http", "tencent_http"],
-  "auto_failover": true, "cross_check_enabled": true }
+  "auto_failover": true, "cross_check_enabled": true,
+  "bypass_system_proxy": true }
 ```
 
 系统会做**容灾切换**并对财务指标做**交叉验证**，一致的数字会变多、覆盖率上升。
+
+### 10.5.1 为什么会看到 `ProxyError` / 「东财接口重试 3 次仍失败」？
+
+这条日志特别容易误导人，拆开看：
+
+| 日志片段 | 真实含义 |
+|---|---|
+| `ProxyError('Unable to connect to proxy', ...)` | **不是代理坏了**。连接走了代理隧道，隧道另一头（东财）断了，urllib3 分不清是谁断的，就记到代理头上 |
+| `RemoteDisconnected` | 对方**一个字节都没回**就直接断开，典型的 IP 限流/风控 |
+| `stock_zh_a_hist` | akshare 里这个函数**就是东财**（文件名 `stock_hist_em.py`，`_em` = East Money） |
+
+所以「我选的是 akshare 啊」这句话有个前提误解：**akshare 是抓取库，不是数据源**。
+它内部封装了东财/新浪/腾讯/同花顺，具体抓谁由函数决定。
+
+现在的行为：东财日线挂了 → 自动换新浪 → 再换腾讯，**报告照常用真实行情生成**，
+不会掉到离线样例。想确认降级有没有发生，看日志里的 `接口降级：... 换下一个接口`。
+
+如果**所有**免费源都不通（比如整机断网），日志会明确写「所有候选接口均失败」+ 每个源的原因，
+然后回退离线样例，并把 `source` 如实标注为 `sample`——**这时报告里的数字是虚构演示数据**。
+
+### 10.5.2 `bypass_system_proxy` 是干嘛的？
+
+默认 `true`，把 `push2his.eastmoney.com` 这类国内域名写进 `no_proxy` 让请求直连。
+
+原因：macOS 上 `requests` 会通过系统设置自动读取代理，**即使你一个 `HTTP_PROXY` 环境变量都没有**。
+Clash 这类工具转发国内行情接口时经常被对方判成风控直接断开，排查时却只看到 `ProxyError`。
+
+只有"必须靠代理才能出网"的环境（比如海外网络）才需要设 `BYPASS_SYSTEM_PROXY=false`。
 
 ### 10.6 报告里出现「无来源数字」怎么办？
 
@@ -437,8 +468,10 @@ python main.py daily
 ### 10.10 数据不对/接口报错？
 
 1. 看日志（默认输出到 stderr）里的具体错误；
-2. 换个数据源（`DATA_SOURCES` 里多配几个，会自动容灾）；
-3. 已知限制见 README「已知限制」：付费数据源需要你自己的授权才能验证。
+2. 搜日志里的 `接口降级`：说明系统已经自动换了上游，报告数据仍然可信；
+3. 看到「回退到离线样例」+ `source=sample` 才需要警惕——**那是虚构演示数据**；
+4. 想换顺序/加付费源，配 `data_sources`（见 10.5）；
+5. 已知限制见 README「已知限制」：付费数据源需要你自己的授权才能验证。
 
 ---
 

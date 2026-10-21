@@ -114,10 +114,13 @@ class Settings:
     rag_min_score: float = 0.15
 
     # ---- 多数据源（DataSourceManager）----
-    # 留空 = 只用默认的 AKShare 单源；配置多个则启用容灾切换与交叉验证
+    # 留空 = 按免费源的完备度顺序自动启用（akshare → sina_http → tencent_http）
     data_sources: List[str] = field(default_factory=list)
     cross_check_enabled: bool = True
     auto_failover: bool = True
+    # 国内行情接口直连、不走系统代理（macOS 上 requests 会自动读系统代理设置，
+    # 经代理转发常被东财判为风控而误报成 ProxyError）
+    bypass_system_proxy: bool = True
     tushare_token: str = ""
     mcp_server_url: str = ""
     jqdata_username: str = ""
@@ -208,6 +211,9 @@ def load_settings(
         "CROSS_CHECK_ENABLED", settings.cross_check_enabled
     )
     settings.auto_failover = _env_bool("AUTO_FAILOVER", settings.auto_failover)
+    settings.bypass_system_proxy = _env_bool(
+        "BYPASS_SYSTEM_PROXY", settings.bypass_system_proxy
+    )
     settings.tushare_token = _env_str("TUSHARE_TOKEN", settings.tushare_token)
     settings.mcp_server_url = _env_str("MCP_SERVER_URL", settings.mcp_server_url)
     settings.jqdata_username = _env_str("JQDATA_USERNAME", settings.jqdata_username)

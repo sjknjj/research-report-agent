@@ -217,7 +217,7 @@ padding:6px 10px;border-radius:6px;}
     <!-- 数据源选择（全部展示，用户随便选） -->
     <div style="margin:20px 0;padding:12px;background:#f8f9fa;border-radius:8px;">
       <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:#374151;">
-        📊 数据源选择（可多选，自动交叉验证）
+        📊 数据源选择（可多选，自动容灾 + 交叉验证）
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;">
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
@@ -227,10 +227,10 @@ padding:6px 10px;border-radius:6px;}
           <input type="checkbox" name="datasource" value="eastmoney_http"> 东方财富
         </label>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
-          <input type="checkbox" name="datasource" value="sina_http"> 新浪财经
+          <input type="checkbox" name="datasource" value="sina_http" checked> 新浪财经
         </label>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
-          <input type="checkbox" name="datasource" value="tencent_http"> 腾讯财经
+          <input type="checkbox" name="datasource" value="tencent_http" checked> 腾讯财经
         </label>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
           <input type="checkbox" name="datasource" value="tushare"> Tushare（配Token可用）
@@ -989,9 +989,10 @@ def index():
 
 
 @app.get("/api/brief", response_model=BriefResponse)
-def api_brief(symbol: str, sources: str = "akshare"):
+def api_brief(symbol: str, sources: str = ""):
     settings = get_settings()
-    # 把用户选中的数据源列表传给 ResearchAssistant
+    # 把用户选中的数据源列表传给 ResearchAssistant；
+    # 留空 = 交给配置/完备度顺序决定，而不是硬写死 akshare 单源
     source_list = [s.strip() for s in sources.split(",") if s.strip()]
     ra = ResearchAssistant(settings, sources=source_list)
     try:
@@ -1076,7 +1077,7 @@ def _render_cross_source_conflicts(result) -> str:
 
 
 @app.get("/api/brief/pdf")
-def api_brief_pdf(symbol: str, sources: str = "akshare"):
+def api_brief_pdf(symbol: str, sources: str = ""):
     """直接返回 PDF 文件，前端可以直接下载。"""
     import os
     from fastapi.responses import FileResponse

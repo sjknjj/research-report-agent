@@ -229,7 +229,9 @@ class DataService:
         valuation = self._safe_valuation(code)
         fund_flow = self._safe_fund_flow(code)
         technicals = analyze_technicals(price_clean)
-        name = info.get("股票简称", code)
+        # 东财口径是「股票简称」，新浪快照口径是「名称」，两边都要认，
+        # 否则降级到新浪时报告标题会变成一串股票代码
+        name = info.get("股票简称") or info.get("名称") or info.get("简称") or code
 
         # 备数据源若回退到离线样例，如实标注为 sample，避免把样例当实时数据
         offline_used = "offline" in (price_source, fin_source)

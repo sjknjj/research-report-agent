@@ -5,6 +5,8 @@
 2. 主数据源挂了自动切备数据源（容灾）；``auto_failover=False`` 时只用主数据源
 3. 多源交叉验证：同一个数字，多个来源不一致时自动标记“数据存疑”
 4. 用户用 ``data_sources`` 配置想用哪些数据源
+5. **未配置时按免费源的完备度自动排序**（见 :data:`FREE_SOURCE_ORDER`），
+   保证「一个不行换另一个」在零配置的情况下也成立
 """
 from __future__ import annotations
 
@@ -12,9 +14,21 @@ import os
 from typing import Any, Dict, List, Optional
 
 from ..common.logger import get_logger
-from .sources import AKShareSource, DataSourceBase, DataSourceError, build_data_source
+from .sources import (
+    FREE_SOURCE_ORDER,
+    AKShareSource,
+    DataSourceBase,
+    DataSourceError,
+    build_data_source,
+    bypass_system_proxy_for_domestic,
+)
 
 logger = get_logger("data.manager")
+
+
+def default_source_names() -> List[str]:
+    """未显式配置数据源时的默认顺序（按免费源完备度排序）。"""
+    return list(FREE_SOURCE_ORDER)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -171,9 +185,16 @@ def build_manager_from_config(config: Optional[Dict[str, Any]] = None) -> DataSo
     ```
     """
     config = config or {}
-    source_names = config.get("sources") or ["akshare"]
+    # 未显式配置时用「免费源完备度顺序」，而不是只挂一个 akshare——
+    # 只有一个源时 auto_failover 形同虚设，东财一限流就整条链路掉到离线样例。
+    source_names = config.get("sources") or default_source_names()
     auto_failover = bool(config.get("auto_failover", True))
     cross_check = bool(config.get("cross_check_enabled", True))
+
+    # 国内行情接口不该走系统代理（见 bypass_system_proxy_for_domestic 的说明）
+    bypass_system_proxy_for_domestic(
+        _env_bool("BYPASS_SYSTEM_PROXY", bool(config.get("bypass_system_proxy", True)))
+    )
 
     sources: List[DataSourceBase] = []
     for name in source_names:
@@ -198,6 +219,12 @@ def build_manager_from_config(config: Optional[Dict[str, Any]] = None) -> DataSo
         logger.warning("没有可用的数据源，回退到 AKShare")
         sources = [AKShareSource()]
 
+    logger.info(
+        "数据源容灾顺序（按完备度）：%s", " → ".join(
+            getattr(s, "name", s.__class__.__name__) for s in sources
+        )
+    )
+
     return DataSourceManager(
         sources=sources,
         enable_cross_check=cross_check,
@@ -213,7 +240,9 @@ def build_manager_from_settings(settings: Optional[Any] = None) -> Optional[Data
     - ``settings.cross_check_enabled`` → 环境变量 ``CROSS_CHECK_ENABLED``
     - ``settings.auto_failover``       → 环境变量 ``AUTO_FAILOVER``
 
-    **未配置任何数据源时返回 None**（调用方保持单数据源行为，避免平白多打网络请求）。
+    未配置任何数据源时**不再返回 None**，而是按 :data:`FREE_SOURCE_ORDER`
+    的完备度顺序建好多源管理器——「一个不行换另一个」必须是默认行为，
+    不能要用户先猜到这个配置项才生效。
     """
     mcp_server_url = getattr(settings, "mcp_server_url", "") if settings is not None else ""
 
@@ -224,7 +253,8 @@ def build_manager_from_settings(settings: Optional[Any] = None) -> Optional[Data
         env_sources = os.environ.get("DATA_SOURCES", "")
         raw_sources = [item.strip() for item in env_sources.split(",") if item.strip()]
     if not raw_sources:
-        return None
+        raw_sources = default_source_names()
+        logger.debug("未配置数据源，使用免费源完备度顺序：%s", raw_sources)
 
     cross_check = getattr(settings, "cross_check_enabled", None) if settings is not None else None
     if cross_check is None:
@@ -232,12 +262,16 @@ def build_manager_from_settings(settings: Optional[Any] = None) -> Optional[Data
     auto_failover = getattr(settings, "auto_failover", None) if settings is not None else None
     if auto_failover is None:
         auto_failover = _env_bool("AUTO_FAILOVER", True)
+    bypass_proxy = getattr(settings, "bypass_system_proxy", None) if settings is not None else None
+    if bypass_proxy is None:
+        bypass_proxy = _env_bool("BYPASS_SYSTEM_PROXY", True)
 
     return build_manager_from_config(
         {
             "sources": list(raw_sources),
             "cross_check_enabled": bool(cross_check),
             "auto_failover": bool(auto_failover),
+            "bypass_system_proxy": bool(bypass_proxy),
             "mcp_server_url": mcp_server_url,
         }
     )
