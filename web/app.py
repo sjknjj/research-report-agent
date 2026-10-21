@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -969,6 +970,17 @@ async function startReport(){
 }
 </script></body></html>"""
 
+# 页面构建标记：右下角显示构建时间，方便确认浏览器加载的到底是不是最新版。
+# 前端 JS 一改，如果浏览器还缓存着旧 HTML，就会继续调用旧接口——
+# 表现正好是"某些 Tab 点了没反应"，而服务端其实早就修好了。
+_BUILD_TAG = time.strftime("%Y-%m-%d %H:%M")
+_PAGE = _PAGE.replace(
+    "</body></html>",
+    '<div style="position:fixed;right:8px;bottom:6px;font-size:11px;'
+    'color:#9ca3af;pointer-events:none;z-index:9999;">构建 '
+    + _BUILD_TAG + "</div></body></html>",
+)
+
 
 class BriefResponse(BaseModel):
     text: str
@@ -985,7 +997,13 @@ class ReportResponse(BaseModel):
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return _PAGE
+    # 禁用缓存：前端 JS 改动后普通刷新必须能拿到新页面。
+    # 否则浏览器会一直用旧 HTML 去调已经被改过的接口，
+    # 现象就是"某些 Tab 点了没反应"，让人误以为后端坏了。
+    return HTMLResponse(
+        _PAGE,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @app.get("/api/brief", response_model=BriefResponse)
