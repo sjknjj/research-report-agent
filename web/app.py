@@ -1522,7 +1522,25 @@ def api_quote(symbol: str):
     except DataSourceError:
         raise HTTPException(status_code=404, detail=f"未找到股票代码 {code}")
     except Exception as exc:  # noqa: BLE001
+        logger.info("东财快照也不可用，改用新浪快照：%s", exc)
+
+    # 东财两个接口都不可用（限流时很常见）就退到新浪快照。
+    # AKShareSource.stock_info 内部已经是「东财 → 新浪」，这里直接复用。
+    try:
+        frame = source.stock_info(code)
+        info = dict(zip(frame["item"], frame["value"]))
+    except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"实时行情获取失败：{exc}")
+    try:
+        return {
+            "symbol": code,
+            "name": str(info.get("名称") or code),
+            "price": round(float(info.get("最新价")), 3),
+            "pct_change": round(float(info.get("涨跌幅")), 2),
+            "source": "sina-spot",
+        }
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=f"实时行情解析失败：{exc}")
 
 
 # ---------------------------------------------------------------------------
